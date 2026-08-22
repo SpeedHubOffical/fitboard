@@ -1,12 +1,13 @@
 import React, { useState, useEffect, useRef } from "react";
 import {
   Plus, X, Link as LinkIcon, Search, Trash2, ShoppingBag,
-  Home, Heart, Bookmark, User, Settings, Sun, Moon, ChevronLeft, Camera, LogOut
+  Home, Heart, Bookmark, User, Settings, Sun, Moon, ChevronLeft, Camera, LogOut, Ban
 } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
 const ITEM_TYPES = ["Top", "Jumper", "Shirt", "Jacket", "Trousers", "Jeans", "Shoes", "Bag", "Accessory"];
 const PREFS_KEY = "fitboard-prefs";
+const ADMIN_EMAILS = ["Kakhifn@gmail.com"];
 
 const THEMES = {
   dark: {
@@ -24,10 +25,10 @@ const THEMES = {
 function loadPrefs() {
   try {
     const raw = localStorage.getItem(PREFS_KEY);
-    if (!raw) return { theme: "dark", liked: [], saved: [], profile: { username: "", bio: "", avatar: null } };
+    if (!raw) return { theme: "dark", liked: [], saved: [] };
     return JSON.parse(raw);
   } catch {
-    return { theme: "dark", liked: [], saved: [], profile: { username: "", bio: "", avatar: null } };
+    return { theme: "dark", liked: [], saved: [] };
   }
 }
 
@@ -48,10 +49,12 @@ export default function App() {
   const [authMessage, setAuthMessage] = useState("");
 
   const [items, setItems] = useState([]);
+  const [profiles, setProfiles] = useState({}); // user_id -> { username, bio, avatar_url }
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [showModal, setShowModal] = useState(false);
   const [showDetail, setShowDetail] = useState(null);
+  const [viewingProfileId, setViewingProfileId] = useState(null);
   const [query, setQuery] = useState("");
   const [tab, setTab] = useState("feed");
   const [showSettings, setShowSettings] = useState(false);
@@ -61,7 +64,6 @@ export default function App() {
   const [themeName, setThemeName] = useState(initialPrefs.theme);
   const [liked, setLiked] = useState(initialPrefs.liked);
   const [saved, setSaved] = useState(initialPrefs.saved);
-  const [profile, setProfile] = useState(initialPrefs.profile);
 
   const [imgFile, setImgFile] = useState(null);
   const [imgPreview, setImgPreview] = useState(null);
@@ -80,6 +82,7 @@ export default function App() {
   const [editAvatar, setEditAvatar] = useState(null);
 
   const t = THEMES[themeName];
+  const isAdmin = session && ADMIN_EMAILS.includes(session.user.email);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
@@ -93,7 +96,10 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (session) loadItems();
+    if (session) {
+      loadItems();
+      loadProfiles();
+    }
   }, [session]);
 
   function persist(next) {
@@ -101,7 +107,6 @@ export default function App() {
       theme: next.theme !== undefined ? next.theme : themeName,
       liked: next.liked !== undefined ? next.liked : liked,
       saved: next.saved !== undefined ? next.saved : saved,
-      profile: next.profile !== undefined ? next.profile : profile,
     };
     savePrefs(merged);
   }
@@ -120,6 +125,15 @@ export default function App() {
       setItems(data || []);
     }
     setLoading(false);
+  }
+
+  async function loadProfiles() {
+    const { data } = await supabase.from("profiles").select("*");
+    if (data) {
+      const map = {};
+      data.forEach((p) => { map[p.user_id] = p; });
+      setProfiles(map);
+    }
   }
 
   async function handleGoogleLogin() {
@@ -172,10 +186,18 @@ export default function App() {
     persist({ theme: next });
   }
 
-  function toggleLiked(id) {
-    const next = liked.includes(id) ? liked.filter((x) => x !== id) : [...liked, id];
+  async function toggleLiked(item) {
+    const alreadyLiked = liked.includes(item.id);
+    const next = alreadyLiked ? liked.filter((x) => x !== item.id) : [...liked, item.id];
     setLiked(next);
     persist({ liked: next });
+
+    const newCount = Math.max(0, (item.like_count || 0) + (alreadyLiked ? -1 : 1));
+    setItems((prev) => prev.map((i) => (i.id === item.id ? { ...i, like_count: newCount } : i)));
+    if (showDetail && showDetail.id === item.id) {
+      setShowDetail({ ...showDetail, like_count: newCount });
+    }
+    await supabase.from("outfits").update({ like_count: newCount }).eq("id", item.id);
   }
 
   function toggleSaved(id) {
@@ -228,6 +250,10 @@ export default function App() {
     setError("");
   }
 
+  function currentProfile() {
+    return (session && profiles[session.user.id]) || { username: "", bio: "", avatar_url: null };
+  }
+
   async function handleUpload() {
     if (!imgFile) return setError("Add a photo first.");
     if (!title.trim()) return setError("Add a title.");
@@ -249,13 +275,16 @@ export default function App() {
         .from("outfit-images")
         .getPublicUrl(fileName);
 
+      const myProfile = currentProfile();
+
       const { error: insertError } = await supabase.from("outfits").insert({
         title: title.trim(),
         price: price.trim(),
         image_url: urlData.publicUrl,
         links,
-        author: profile.username || session.user.email.split("@")[0],
+        author: myProfile.username || session.user.email.split("@")[0],
         user_id: session.user.id,
+        like_count: 0,
       });
       if (insertError) throw insertError;
 
@@ -263,7 +292,7 @@ export default function App() {
       setShowModal(false);
       loadItems();
     } catch (e) {
-      setError("Upload failed — try again.");
+      setError(e.message && e.message.includes("row-level security") ? "You've been restricted from posting." : "Upload failed — try again.");
     }
     setSaving(false);
   }
@@ -279,17 +308,38 @@ export default function App() {
     loadItems();
   }
 
+  async function handleBanUser(userId) {
+    if (!window.confirm("Ban this user? They won't be able to post anymore.")) return;
+    const { error: banError } = await supabase.from("banned_users").insert({ user_id: userId });
+    if (banError) {
+      alert("Couldn't ban — they may already be banned, or you may need to re-check admin setup.");
+    } else {
+      alert("User banned.");
+    }
+  }
+
   function openEditProfile() {
-    setEditUsername(profile.username || "");
-    setEditBio(profile.bio || "");
-    setEditAvatar(profile.avatar || null);
+    const p = currentProfile();
+    setEditUsername(p.username || "");
+    setEditBio(p.bio || "");
+    setEditAvatar(p.avatar_url || null);
     setShowEditProfile(true);
   }
 
-  function saveProfile() {
-    const next = { username: editUsername.trim(), bio: editBio.trim(), avatar: editAvatar };
-    setProfile(next);
-    persist({ profile: next });
+  async function saveProfile() {
+    const payload = {
+      user_id: session.user.id,
+      username: editUsername.trim(),
+      bio: editBio.trim(),
+      avatar_url: editAvatar,
+      updated_at: new Date().toISOString(),
+    };
+    const { error: upsertError } = await supabase.from("profiles").upsert(payload);
+    if (upsertError) {
+      setError("Couldn't save profile — try again.");
+      return;
+    }
+    setProfiles((prev) => ({ ...prev, [session.user.id]: payload }));
     setShowEditProfile(false);
   }
 
@@ -306,7 +356,12 @@ export default function App() {
     return (item.links || []).some((l) => l.type.toLowerCase().includes(q));
   });
 
-  const isMine = (item) => session && item.user_id === session.user.id;
+  const isMine = (item) => session && (item.user_id === session.user.id || isAdmin);
+
+  function authorLabel(item) {
+    const p = profiles[item.user_id];
+    return (p && p.username) || item.author || "Anonymous";
+  }
 
   if (!authChecked) {
     return (
@@ -367,6 +422,9 @@ export default function App() {
     );
   }
 
+  const viewingProfile = viewingProfileId ? (profiles[viewingProfileId] || {}) : null;
+  const viewingProfilePosts = viewingProfileId ? items.filter((i) => i.user_id === viewingProfileId) : [];
+
   return (
     <div style={{ ...styles.page, background: t.bg, color: t.text }}>
       <style>{`
@@ -386,12 +444,18 @@ export default function App() {
           position: absolute; top: 8px; left: 8px; background: rgba(20,20,20,0.85); backdrop-filter: blur(4px);
           color: #fff; font-weight: 700; font-size: 13px; padding: 5px 10px; border-radius: 20px;
         }
-        .item-count {
-          position: absolute; top: 8px; right: 8px; background: ${t.accent}; color: #fff; font-weight: 700;
-          font-size: 11px; padding: 4px 8px; border-radius: 20px; display: flex; align-items: center; gap: 3px;
+        .like-badge {
+          position: absolute; top: 8px; right: 8px; background: rgba(20,20,20,0.85); backdrop-filter: blur(4px);
+          color: #fff; font-weight: 700; font-size: 11px; padding: 4px 8px; border-radius: 20px;
+          display: flex; align-items: center; gap: 3px;
         }
+        .card-footer { padding: 8px 10px 10px; }
         .card-title {
-          padding: 8px 10px 10px; font-size: 12px; font-weight: 700; color: ${t.text};
+          font-size: 12px; font-weight: 700; color: ${t.text};
+          overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .card-author {
+          font-size: 11px; color: ${t.textFaint}; margin-top: 2px;
           overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
         }
         .fab {
@@ -517,6 +581,7 @@ export default function App() {
           gap: 4px; font-weight: 700; font-size: 14px;
         }
         .hidden-file-input { position: absolute; width: 1px; height: 1px; opacity: 0; overflow: hidden; }
+        .author-link { cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
       `}</style>
 
       {tab === "profile" ? (
@@ -529,11 +594,11 @@ export default function App() {
           </div>
           <div className="profile-header">
             <div className="avatar-lg">
-              {profile.avatar ? <img src={profile.avatar} alt="avatar" /> : <User size={34} color={t.textFaint} />}
+              {currentProfile().avatar_url ? <img src={currentProfile().avatar_url} alt="avatar" /> : <User size={34} color={t.textFaint} />}
             </div>
-            <div style={{ fontWeight: 900, fontSize: 18 }}>{profile.username || session.user.email}</div>
+            <div style={{ fontWeight: 900, fontSize: 18 }}>{currentProfile().username || session.user.email}</div>
             <div style={{ fontSize: 13, color: t.textMuted, marginTop: 4, maxWidth: 280 }}>
-              {profile.bio || "No bio yet — tell people what your fits are about."}
+              {currentProfile().bio || "No bio yet — tell people what your fits are about."}
             </div>
             <button className="edit-profile-btn" onClick={openEditProfile}>Edit profile</button>
           </div>
@@ -554,7 +619,10 @@ export default function App() {
                 <div className="card" key={item.id} onClick={() => setShowDetail(item)}>
                   <img src={item.image_url} alt={item.title || "Outfit"} />
                   <div className="price-tag">€{item.price}</div>
-                  {item.title && <div className="card-title">{item.title}</div>}
+                  <div className="like-badge"><Heart size={10} /> {item.like_count || 0}</div>
+                  <div className="card-footer">
+                    {item.title && <div className="card-title">{item.title}</div>}
+                  </div>
                 </div>
               ))}
             </div>
@@ -597,10 +665,16 @@ export default function App() {
                 <div className="card" key={item.id} onClick={() => setShowDetail(item)}>
                   <img src={item.image_url} alt={item.title || "Outfit"} />
                   <div className="price-tag">€{item.price}</div>
-                  {item.links && item.links.length > 1 && (
-                    <div className="item-count"><ShoppingBag size={11} /> {item.links.length}</div>
-                  )}
-                  {item.title && <div className="card-title">{item.title}</div>}
+                  <div className="like-badge"><Heart size={10} /> {item.like_count || 0}</div>
+                  <div className="card-footer">
+                    {item.title && <div className="card-title">{item.title}</div>}
+                    <div
+                      className="card-author author-link"
+                      onClick={(e) => { e.stopPropagation(); setViewingProfileId(item.user_id); }}
+                    >
+                      by {authorLabel(item)}
+                    </div>
+                  </div>
                 </div>
               ))}
             </div>
@@ -632,9 +706,13 @@ export default function App() {
                     <div style={{ fontSize: 13, fontWeight: 700, color: t.textMuted, marginBottom: 4 }}>{showDetail.title}</div>
                   )}
                   <span style={{ fontSize: 20, fontWeight: 900 }}>€{showDetail.price}</span>
-                  {showDetail.author && (
-                    <div style={{ fontSize: 12, color: t.textFaint, marginTop: 4 }}>by {showDetail.author}</div>
-                  )}
+                  <div
+                    className="author-link"
+                    style={{ fontSize: 12, color: t.textFaint, marginTop: 4 }}
+                    onClick={() => { setShowDetail(null); setViewingProfileId(showDetail.user_id); }}
+                  >
+                    by {authorLabel(showDetail)}
+                  </div>
                 </div>
                 <button onClick={() => setShowDetail(null)} style={{ background: "none", border: "none", color: t.textMuted, cursor: "pointer" }}>
                   <X size={20} />
@@ -642,8 +720,8 @@ export default function App() {
               </div>
 
               <div className="action-row">
-                <button className={`action-btn ${liked.includes(showDetail.id) ? "active" : ""}`} onClick={() => toggleLiked(showDetail.id)}>
-                  <Heart size={15} fill={liked.includes(showDetail.id) ? t.accent : "none"} /> Like
+                <button className={`action-btn ${liked.includes(showDetail.id) ? "active" : ""}`} onClick={() => toggleLiked(showDetail)}>
+                  <Heart size={15} fill={liked.includes(showDetail.id) ? t.accent : "none"} /> Like · {showDetail.like_count || 0}
                 </button>
                 <button className={`action-btn ${saved.includes(showDetail.id) ? "active" : ""}`} onClick={() => toggleSaved(showDetail.id)}>
                   <Bookmark size={15} fill={saved.includes(showDetail.id) ? t.accent : "none"} /> Save
@@ -656,12 +734,69 @@ export default function App() {
                 </button>
               )}
 
+              {isAdmin && showDetail.user_id !== session.user.id && (
+                <button className="action-btn danger" style={{ width: "100%", marginTop: 10 }} onClick={() => handleBanUser(showDetail.user_id)}>
+                  <Ban size={15} /> Ban this user
+                </button>
+              )}
+
               <div className="field-label" style={{ marginTop: 16 }}>Shop this look</div>
               {(showDetail.links || []).map((l, i) => (
                 <a key={i} className="buy-link-btn" href={l.url} target="_blank" rel="noopener noreferrer">
                   <span style={{ fontWeight: 700, fontSize: 14 }}>{l.type}</span>
                   <span style={{ color: t.accent, fontWeight: 700, fontSize: 13 }}>Shop →</span>
                 </a>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {viewingProfileId && (
+        <div className="detail-backdrop" onClick={() => setViewingProfileId(null)}>
+          <div className="detail-card" onClick={(e) => e.stopPropagation()} style={{ maxHeight: "80vh" }}>
+            <div style={{ padding: 16 }}>
+              <div className="sheet-header">
+                <span style={{ fontWeight: 800, fontSize: 16 }}>Profile</span>
+                <button onClick={() => setViewingProfileId(null)} style={{ background: "none", border: "none", color: t.textMuted, cursor: "pointer" }}>
+                  <X size={20} />
+                </button>
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: "14px 0" }}>
+                <div className="avatar-lg">
+                  {viewingProfile && viewingProfile.avatar_url ? (
+                    <img src={viewingProfile.avatar_url} alt="avatar" />
+                  ) : (
+                    <User size={30} color={t.textFaint} />
+                  )}
+                </div>
+                <div style={{ fontWeight: 900, fontSize: 17 }}>
+                  {(viewingProfile && viewingProfile.username) || "Anonymous"}
+                </div>
+                {viewingProfile && viewingProfile.bio && (
+                  <div style={{ fontSize: 13, color: t.textMuted, marginTop: 4, textAlign: "center" }}>{viewingProfile.bio}</div>
+                )}
+                {isAdmin && viewingProfileId !== session.user.id && (
+                  <button className="action-btn danger" style={{ marginTop: 14, padding: "9px 18px" }} onClick={() => handleBanUser(viewingProfileId)}>
+                    <Ban size={14} /> Ban this user
+                  </button>
+                )}
+              </div>
+            </div>
+            <div style={{ padding: "0 16px 16px", fontSize: 12, fontWeight: 700, color: t.textMuted, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+              {viewingProfilePosts.length} {viewingProfilePosts.length === 1 ? "post" : "posts"}
+            </div>
+            <div className="masonry" style={{ padding: "0 6px 16px" }}>
+              {viewingProfilePosts.map((item) => (
+                <div
+                  className="card"
+                  key={item.id}
+                  onClick={() => { setViewingProfileId(null); setShowDetail(item); }}
+                >
+                  <img src={item.image_url} alt={item.title || "Outfit"} />
+                  <div className="price-tag">€{item.price}</div>
+                  <div className="like-badge"><Heart size={10} /> {item.like_count || 0}</div>
+                </div>
               ))}
             </div>
           </div>
@@ -732,7 +867,9 @@ export default function App() {
               </button>
             </div>
 
-            <div style={{ fontSize: 12, color: t.textFaint, marginTop: 10 }}>Signed in as {session.user.email}</div>
+            <div style={{ fontSize: 12, color: t.textFaint, marginTop: 10 }}>
+              Signed in as {session.user.email}{isAdmin ? " · Admin" : ""}
+            </div>
 
             <div className="settings-row" style={{ cursor: "default" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -785,6 +922,8 @@ export default function App() {
 
             <div className="field-label">Bio</div>
             <input className="field-input" type="text" placeholder="A line about your style" value={editBio} onChange={(e) => setEditBio(e.target.value)} />
+
+            {error && <div style={{ color: "#ff6b5e", fontSize: 13, marginTop: 12 }}>{error}</div>}
 
             <button className="upload-cta" onClick={saveProfile}>Save profile</button>
           </div>
