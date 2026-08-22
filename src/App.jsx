@@ -1,14 +1,20 @@
 import React, { useState, useEffect, useRef } from "react";
 import {
   Plus, X, Link as LinkIcon, Search, Trash2, ShoppingBag,
-  Home, Heart, Bookmark, User, Settings, Sun, Moon, ChevronLeft, Camera, LogOut, Ban
+  Home, Heart, Bookmark, User, Settings, Sun, Moon, ChevronLeft, Camera, LogOut, Ban, SlidersHorizontal
 } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
 const ITEM_TYPES = ["Top", "Jumper", "Shirt", "Jacket", "Trousers", "Jeans", "Shoes", "Bag", "Accessory"];
 const PREFS_KEY = "fitboard-prefs";
 const ADMIN_EMAILS = ["kakhifn@gmail.com"];
-const STYLE_OPTIONS = ["Y2K", "Streetwear", "Baggy", "Emo", "Grunge", "Sporty", "Preppy", "Minimalist", "Cottagecore", "Techwear", "Vintage", "Formal"];
+const STYLE_OPTIONS = [
+  "Y2K", "Streetwear", "Baggy", "Emo", "Grunge", "Sporty", "Athleisure", "Preppy", "Old Money",
+  "Minimalist", "Cottagecore", "Techwear", "Vintage", "Formal", "Casual", "Boho", "Punk", "Goth",
+  "Skater", "Dark Academia", "Light Academia", "Cyberpunk", "Kawaii", "Business Casual", "Retro",
+  "Denim", "Monochrome", "Glam", "Western", "Military", "Coastal", "Indie", "Softgirl", "Baddie",
+  "VSCO", "E-girl", "E-boy", "Chic", "Layered",
+];
 
 const THEMES = {
   dark: {
@@ -61,6 +67,12 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showEditProfile, setShowEditProfile] = useState(false);
 
+  const [showFilters, setShowFilters] = useState(false);
+  const [minPrice, setMinPrice] = useState("");
+  const [maxPrice, setMaxPrice] = useState("");
+  const [filterStyles, setFilterStyles] = useState([]);
+  const [appliedFilters, setAppliedFilters] = useState({ min: "", max: "", styles: [] });
+
   const [profilesLoaded, setProfilesLoaded] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [obGender, setObGender] = useState("");
@@ -79,6 +91,7 @@ export default function App() {
   const [links, setLinks] = useState([]);
   const [linkType, setLinkType] = useState(ITEM_TYPES[0]);
   const [linkUrl, setLinkUrl] = useState("");
+  const [postStyles, setPostStyles] = useState([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const fileInputId = useRef(`file-${Math.random().toString(36).slice(2)}`);
@@ -253,6 +266,10 @@ export default function App() {
     setLinks(links.filter((_, i) => i !== idx));
   }
 
+  function togglePostStyle(s) {
+    setPostStyles((prev) => (prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]));
+  }
+
   function resetForm() {
     setImgFile(null);
     setImgPreview(null);
@@ -260,6 +277,7 @@ export default function App() {
     setPrice("");
     setLinks([]);
     setLinkUrl("");
+    setPostStyles([]);
     setError("");
   }
 
@@ -295,6 +313,7 @@ export default function App() {
         price: price.trim(),
         image_url: urlData.publicUrl,
         links,
+        styles: postStyles,
         author: myProfile.username || session.user.email.split("@")[0],
         user_id: session.user.id,
         like_count: 0,
@@ -385,17 +404,52 @@ export default function App() {
     setObSaving(false);
   }
 
+  function toggleFilterStyle(s) {
+    setFilterStyles((prev) => (prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]));
+  }
+
+  function applyFilters() {
+    setAppliedFilters({ min: minPrice, max: maxPrice, styles: filterStyles });
+    setShowFilters(false);
+  }
+
+  function clearFilters() {
+    setMinPrice("");
+    setMaxPrice("");
+    setFilterStyles([]);
+    setAppliedFilters({ min: "", max: "", styles: [] });
+    setShowFilters(false);
+  }
+
+  const activeFilterCount =
+    (appliedFilters.min ? 1 : 0) + (appliedFilters.max ? 1 : 0) + (appliedFilters.styles.length > 0 ? 1 : 0);
+
   const baseList =
     tab === "liked" ? items.filter((i) => liked.includes(i.id)) :
     tab === "saved" ? items.filter((i) => saved.includes(i.id)) :
     items;
 
   const filtered = baseList.filter((item) => {
-    if (!query.trim()) return true;
-    const q = query.toLowerCase();
-    if ((item.title || "").toLowerCase().includes(q)) return true;
-    if (String(item.price).toLowerCase().includes(q)) return true;
-    return (item.links || []).some((l) => l.type.toLowerCase().includes(q));
+    if (query.trim()) {
+      const q = query.toLowerCase();
+      const matchesText =
+        (item.title || "").toLowerCase().includes(q) ||
+        String(item.price).toLowerCase().includes(q) ||
+        (item.links || []).some((l) => l.type.toLowerCase().includes(q));
+      if (!matchesText) return false;
+    }
+
+    const numPrice = parseFloat(item.price);
+    if (appliedFilters.min && !isNaN(numPrice) && numPrice < parseFloat(appliedFilters.min)) return false;
+    if (appliedFilters.max && !isNaN(numPrice) && numPrice > parseFloat(appliedFilters.max)) return false;
+
+    if (appliedFilters.styles.length > 0) {
+      const itemStyles = item.styles || [];
+      const hasMatch = appliedFilters.styles.some((s) => itemStyles.includes(s));
+      if (!hasMatch) return false;
+    }
+
+    return true;
   });
 
   const isMine = (item) => session && (item.user_id === session.user.id || isAdmin);
@@ -477,7 +531,7 @@ export default function App() {
             background: ${t.cardAlt}; color: ${t.text}; font-weight: 700; font-size: 14px; cursor: pointer;
           }
           .ob-gender-btn.active { border-color: ${t.accent}; color: ${t.accent}; }
-          .ob-style-grid { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px; }
+          .ob-style-grid { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px; max-height: 40vh; overflow-y: auto; padding-bottom: 4px; }
           .ob-style-chip {
             padding: 10px 16px; border-radius: 20px; border: 1px solid ${t.border};
             background: ${t.cardAlt}; color: ${t.text}; font-weight: 700; font-size: 13px; cursor: pointer;
@@ -614,13 +668,25 @@ export default function App() {
           border: none; border-radius: 14px; padding: 15px; cursor: pointer;
         }
         .upload-cta:disabled { opacity: 0.5; }
-        .search-wrap { margin: 0 12px 4px; position: relative; }
+        .search-row { display: flex; gap: 8px; margin: 0 12px 4px; align-items: center; }
+        .search-wrap { position: relative; flex: 1; }
         .search-input {
           width: 100%; background: ${t.card}; border: 1px solid ${t.border}; border-radius: 14px;
           padding: 12px 14px 12px 40px; color: ${t.text}; font-size: 14px; outline: none;
         }
         .search-input:focus { border-color: ${t.accent}; }
         .search-icon { position: absolute; left: 13px; top: 50%; transform: translateY(-50%); color: ${t.textFaint}; }
+        .filter-btn {
+          position: relative; flex: 0 0 auto; width: 44px; height: 44px; border-radius: 14px;
+          background: ${t.card}; border: 1px solid ${t.border}; display: flex; align-items: center;
+          justify-content: center; cursor: pointer;
+        }
+        .filter-btn.active { border-color: ${t.accent}; }
+        .filter-dot {
+          position: absolute; top: -4px; right: -4px; background: ${t.accent}; color: #fff;
+          font-size: 10px; font-weight: 700; width: 17px; height: 17px; border-radius: 50%;
+          display: flex; align-items: center; justify-content: center;
+        }
         .buy-link-btn {
           display: flex; align-items: center; justify-content: space-between; background: ${t.cardAlt};
           border: 1px solid ${t.border}; border-radius: 12px; padding: 13px 14px; margin-top: 10px;
@@ -683,6 +749,22 @@ export default function App() {
         }
         .hidden-file-input { position: absolute; width: 1px; height: 1px; opacity: 0; overflow: hidden; }
         .author-link { cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+        .style-chip-grid { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; max-height: 32vh; overflow-y: auto; padding-bottom: 4px; }
+        .style-chip {
+          padding: 9px 14px; border-radius: 20px; border: 1px solid ${t.border};
+          background: ${t.cardAlt}; color: ${t.text}; font-weight: 700; font-size: 12.5px; cursor: pointer;
+        }
+        .style-chip.active { background: ${t.accent}; border-color: ${t.accent}; color: #fff; }
+        .price-range-row { display: flex; gap: 10px; align-items: center; }
+        .filter-footer-row { display: flex; gap: 10px; margin-top: 22px; }
+        .filter-clear-btn {
+          flex: 1; background: ${t.cardAlt}; border: 1px solid ${t.border}; color: ${t.text};
+          font-weight: 700; font-size: 14px; border-radius: 14px; padding: 14px; cursor: pointer;
+        }
+        .filter-apply-btn {
+          flex: 1.4; background: ${t.accent}; border: none; color: #fff;
+          font-weight: 700; font-size: 14px; border-radius: 14px; padding: 14px; cursor: pointer;
+        }
       `}</style>
 
       {tab === "profile" ? (
@@ -740,14 +822,24 @@ export default function App() {
             </button>
           </div>
 
-          <div className="search-wrap">
-            <Search className="search-icon" size={16} />
-            <input
-              className="search-input"
-              placeholder="Search by title, price, or item — e.g. y2k"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-            />
+          <div className="search-row">
+            <div className="search-wrap">
+              <Search className="search-icon" size={16} />
+              <input
+                className="search-input"
+                placeholder="Search by title, price, or item — e.g. y2k"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+              />
+            </div>
+            <button
+              className={`filter-btn ${activeFilterCount > 0 ? "active" : ""}`}
+              onClick={() => { setMinPrice(appliedFilters.min); setMaxPrice(appliedFilters.max); setFilterStyles(appliedFilters.styles); setShowFilters(true); }}
+              aria-label="Filters"
+            >
+              <SlidersHorizontal size={17} color={activeFilterCount > 0 ? t.accent : t.text} />
+              {activeFilterCount > 0 && <div className="filter-dot">{activeFilterCount}</div>}
+            </button>
           </div>
 
           {loading ? (
@@ -758,7 +850,7 @@ export default function App() {
             <div style={styles.empty}>
               {tab === "liked" && "No liked outfits yet."}
               {tab === "saved" && "No saved outfits yet."}
-              {tab === "feed" && (items.length === 0 ? <>No looks yet.<br />Tap + to post the first one.</> : `No matches for "${query}"`)}
+              {tab === "feed" && (items.length === 0 ? <>No looks yet.<br />Tap + to post the first one.</> : "No outfits match your search or filters.")}
             </div>
           ) : (
             <div className="masonry">
@@ -814,6 +906,15 @@ export default function App() {
                   >
                     by {authorLabel(showDetail)}
                   </div>
+                  {showDetail.styles && showDetail.styles.length > 0 && (
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+                      {showDetail.styles.map((s) => (
+                        <span key={s} style={{ fontSize: 11, fontWeight: 700, color: t.accent, background: t.cardAlt, border: `1px solid ${t.border}`, padding: "4px 10px", borderRadius: 20 }}>
+                          {s}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
                 <button onClick={() => setShowDetail(null)} style={{ background: "none", border: "none", color: t.textMuted, cursor: "pointer" }}>
                   <X size={20} />
@@ -904,6 +1005,40 @@ export default function App() {
         </div>
       )}
 
+      {showFilters && (
+        <div className="modal-backdrop" onClick={() => setShowFilters(false)}>
+          <div className="modal-sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="sheet-header">
+              <h2 style={{ margin: 0, fontSize: 18, fontWeight: 800 }}>Filters</h2>
+              <button onClick={() => setShowFilters(false)} style={{ background: "none", border: "none", color: t.textMuted, cursor: "pointer" }}>
+                <X size={22} />
+              </button>
+            </div>
+
+            <div className="field-label">Price range (€)</div>
+            <div className="price-range-row">
+              <input className="field-input" type="number" inputMode="decimal" placeholder="Min" value={minPrice} onChange={(e) => setMinPrice(e.target.value)} />
+              <span style={{ color: t.textFaint }}>–</span>
+              <input className="field-input" type="number" inputMode="decimal" placeholder="Max" value={maxPrice} onChange={(e) => setMaxPrice(e.target.value)} />
+            </div>
+
+            <div className="field-label">Styles</div>
+            <div className="style-chip-grid">
+              {STYLE_OPTIONS.map((s) => (
+                <button key={s} className={`style-chip ${filterStyles.includes(s) ? "active" : ""}`} onClick={() => toggleFilterStyle(s)}>
+                  {s}
+                </button>
+              ))}
+            </div>
+
+            <div className="filter-footer-row">
+              <button className="filter-clear-btn" onClick={clearFilters}>Clear all</button>
+              <button className="filter-apply-btn" onClick={applyFilters}>Apply filters</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showModal && (
         <div className="modal-backdrop" onClick={() => setShowModal(false)}>
           <div className="modal-sheet" onClick={(e) => e.stopPropagation()}>
@@ -927,6 +1062,15 @@ export default function App() {
 
             <div className="field-label">Price (€)</div>
             <input className="field-input" type="number" inputMode="decimal" placeholder="e.g. 45" value={price} onChange={(e) => setPrice(e.target.value)} />
+
+            <div className="field-label">Styles (pick as many as fit)</div>
+            <div className="style-chip-grid">
+              {STYLE_OPTIONS.map((s) => (
+                <button key={s} className={`style-chip ${postStyles.includes(s) ? "active" : ""}`} onClick={() => togglePostStyle(s)}>
+                  {s}
+                </button>
+              ))}
+            </div>
 
             <div className="field-label"><LinkIcon size={13} /> Item links</div>
             <div className="link-row">
