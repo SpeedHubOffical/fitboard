@@ -7,7 +7,7 @@ import { supabase } from "./supabaseClient";
 
 const ITEM_TYPES = ["Top", "Jumper", "Shirt", "Jacket", "Trousers", "Jeans", "Shoes", "Bag", "Accessory"];
 const PREFS_KEY = "fitboard-prefs";
-const ADMIN_EMAILS = ["Kakhifn@gmail.com"];
+const ADMIN_EMAILS = ["kakhifn@gmail.com"];
 
 const THEMES = {
   dark: {
