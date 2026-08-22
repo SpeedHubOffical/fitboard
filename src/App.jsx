@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import {
   Plus, X, Link as LinkIcon, Search, Trash2, ShoppingBag,
-  Home, Heart, Bookmark, User, Settings, Sun, Moon, ChevronLeft, Camera
+  Home, Heart, Bookmark, User, Settings, Sun, Moon, ChevronLeft, Camera, LogOut
 } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
@@ -34,12 +34,19 @@ function loadPrefs() {
 function savePrefs(prefs) {
   try {
     localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
-  } catch {
-    // storage full or blocked, ignore
-  }
+  } catch {}
 }
 
 export default function App() {
+  const [session, setSession] = useState(null);
+  const [authChecked, setAuthChecked] = useState(false);
+  const [authMode, setAuthMode] = useState("signin");
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authError, setAuthError] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authMessage, setAuthMessage] = useState("");
+
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
@@ -75,8 +82,19 @@ export default function App() {
   const t = THEMES[themeName];
 
   useEffect(() => {
-    loadItems();
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session);
+      setAuthChecked(true);
+    });
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, sess) => {
+      setSession(sess);
+    });
+    return () => listener.subscription.unsubscribe();
   }, []);
+
+  useEffect(() => {
+    if (session) loadItems();
+  }, [session]);
 
   function persist(next) {
     const merged = {
@@ -96,12 +114,56 @@ export default function App() {
       .select("*")
       .order("created_at", { ascending: false });
     if (fetchError) {
-      setLoadError("Couldn't load the feed. Check your Supabase setup in .env");
+      setLoadError("Couldn't load the feed.");
       setItems([]);
     } else {
       setItems(data || []);
     }
     setLoading(false);
+  }
+
+  async function handleGoogleLogin() {
+    setAuthError("");
+    const { error: oauthError } = await supabase.auth.signInWithOAuth({
+      provider: "google",
+      options: { redirectTo: window.location.origin },
+    });
+    if (oauthError) setAuthError("Google sign-in failed — try again.");
+  }
+
+  async function handleEmailAuth() {
+    if (!authEmail.trim() || !authPassword.trim()) {
+      setAuthError("Enter both email and password.");
+      return;
+    }
+    setAuthBusy(true);
+    setAuthError("");
+    setAuthMessage("");
+    if (authMode === "signup") {
+      const { error: signUpError } = await supabase.auth.signUp({
+        email: authEmail.trim(),
+        password: authPassword,
+      });
+      if (signUpError) {
+        setAuthError(signUpError.message);
+      } else {
+        setAuthMessage("Check your email to confirm your account, then sign in.");
+        setAuthMode("signin");
+      }
+    } else {
+      const { error: signInError } = await supabase.auth.signInWithPassword({
+        email: authEmail.trim(),
+        password: authPassword,
+      });
+      if (signInError) setAuthError(signInError.message);
+    }
+    setAuthBusy(false);
+  }
+
+  async function handleSignOut() {
+    await supabase.auth.signOut();
+    setShowSettings(false);
+    setTab("feed");
   }
 
   function toggleTheme() {
@@ -192,7 +254,8 @@ export default function App() {
         price: price.trim(),
         image_url: urlData.publicUrl,
         links,
-        author: profile.username || "Anonymous",
+        author: profile.username || session.user.email.split("@")[0],
+        user_id: session.user.id,
       });
       if (insertError) throw insertError;
 
@@ -200,9 +263,20 @@ export default function App() {
       setShowModal(false);
       loadItems();
     } catch (e) {
-      setError("Upload failed — check your Supabase setup.");
+      setError("Upload failed — try again.");
     }
     setSaving(false);
+  }
+
+  async function handleDelete(item) {
+    if (!window.confirm("Delete this outfit? This can't be undone.")) return;
+    const { error: deleteError } = await supabase.from("outfits").delete().eq("id", item.id);
+    if (deleteError) {
+      setError("Couldn't delete — try again.");
+      return;
+    }
+    setShowDetail(null);
+    loadItems();
   }
 
   function openEditProfile() {
@@ -231,6 +305,67 @@ export default function App() {
     if (String(item.price).toLowerCase().includes(q)) return true;
     return (item.links || []).some((l) => l.type.toLowerCase().includes(q));
   });
+
+  const isMine = (item) => session && item.user_id === session.user.id;
+
+  if (!authChecked) {
+    return (
+      <div style={{ ...styles.page, background: THEMES.dark.bg, color: THEMES.dark.text, display: "flex", alignItems: "center", justifyContent: "center" }}>
+        Loading…
+      </div>
+    );
+  }
+
+  if (!session) {
+    return (
+      <div style={{ ...styles.page, background: t.bg, color: t.text, display: "flex", flexDirection: "column", justifyContent: "center", padding: 24 }}>
+        <style>{`
+          * { box-sizing: border-box; }
+          .auth-input {
+            width: 100%; background: ${t.inputBg}; border: 1px solid ${t.border}; border-radius: 12px;
+            padding: 14px; color: ${t.text}; font-size: 15px; outline: none; margin-top: 10px;
+          }
+          .auth-input:focus { border-color: ${t.accent}; }
+          .auth-btn {
+            width: 100%; padding: 14px; border-radius: 12px; font-weight: 700; font-size: 15px;
+            border: none; cursor: pointer; margin-top: 14px;
+          }
+          .auth-google { background: #fff; color: #1a1a1a; display: flex; align-items: center; justify-content: center; gap: 10px; }
+          .auth-primary { background: ${t.accent}; color: #fff; }
+          .auth-switch { text-align: center; margin-top: 18px; font-size: 13px; color: ${t.textMuted}; }
+          .auth-switch span { color: ${t.accent}; font-weight: 700; cursor: pointer; }
+        `}</style>
+        <div style={{ textAlign: "center", marginBottom: 30 }}>
+          <div style={{ fontSize: 30, fontWeight: 900 }}><span style={{ color: t.accent }}>Fit</span>Board</div>
+          <div style={{ fontSize: 13, color: t.textMuted, marginTop: 6 }}>Post your fits. Shop everyone else's.</div>
+        </div>
+
+        <button className="auth-btn auth-google" onClick={handleGoogleLogin}>
+          Continue with Google
+        </button>
+
+        <div style={{ textAlign: "center", color: t.textFaint, fontSize: 12, margin: "18px 0" }}>or</div>
+
+        <input className="auth-input" type="email" placeholder="Email" value={authEmail} onChange={(e) => setAuthEmail(e.target.value)} />
+        <input className="auth-input" type="password" placeholder="Password" value={authPassword} onChange={(e) => setAuthPassword(e.target.value)} />
+
+        {authError && <div style={{ color: "#ff6b5e", fontSize: 13, marginTop: 10 }}>{authError}</div>}
+        {authMessage && <div style={{ color: "#5eb8ff", fontSize: 13, marginTop: 10 }}>{authMessage}</div>}
+
+        <button className="auth-btn auth-primary" onClick={handleEmailAuth} disabled={authBusy}>
+          {authBusy ? "Please wait…" : authMode === "signup" ? "Create account" : "Sign in"}
+        </button>
+
+        <div className="auth-switch">
+          {authMode === "signup" ? (
+            <>Already have an account? <span onClick={() => { setAuthMode("signin"); setAuthError(""); }}>Sign in</span></>
+          ) : (
+            <>New here? <span onClick={() => { setAuthMode("signup"); setAuthError(""); }}>Create an account</span></>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={{ ...styles.page, background: t.bg, color: t.text }}>
@@ -333,6 +468,7 @@ export default function App() {
           cursor: pointer; font-weight: 700; font-size: 13px; color: ${t.text};
         }
         .action-btn.active { border-color: ${t.accent}; color: ${t.accent}; }
+        .action-btn.danger { color: #ff6b5e; }
         .bottom-nav {
           position: fixed; bottom: 0; left: 0; right: 0; z-index: 25; display: flex; background: ${t.sheetBg};
           border-top: 1px solid ${t.border}; padding: 8px 6px calc(8px + env(safe-area-inset-bottom));
@@ -349,7 +485,7 @@ export default function App() {
         }
         .settings-row {
           display: flex; align-items: center; justify-content: space-between; background: ${t.cardAlt};
-          border: 1px solid ${t.border}; border-radius: 14px; padding: 14px; margin-top: 10px;
+          border: 1px solid ${t.border}; border-radius: 14px; padding: 14px; margin-top: 10px; cursor: pointer;
         }
         .toggle-track {
           width: 46px; height: 26px; border-radius: 20px; background: ${themeName === "dark" ? t.accent : t.border};
@@ -395,7 +531,7 @@ export default function App() {
             <div className="avatar-lg">
               {profile.avatar ? <img src={profile.avatar} alt="avatar" /> : <User size={34} color={t.textFaint} />}
             </div>
-            <div style={{ fontWeight: 900, fontSize: 18 }}>{profile.username || "Add a username"}</div>
+            <div style={{ fontWeight: 900, fontSize: 18 }}>{profile.username || session.user.email}</div>
             <div style={{ fontSize: 13, color: t.textMuted, marginTop: 4, maxWidth: 280 }}>
               {profile.bio || "No bio yet — tell people what your fits are about."}
             </div>
@@ -410,11 +546,11 @@ export default function App() {
           <div style={{ padding: "16px 16px 0", fontSize: 12, fontWeight: 700, color: t.textMuted, textTransform: "uppercase", letterSpacing: "0.06em" }}>
             Your uploads
           </div>
-          {!profile.username || items.filter((i) => i.author === profile.username).length === 0 ? (
-            <div style={styles.empty}>Nothing posted under this username yet.</div>
+          {items.filter((i) => i.user_id === session.user.id).length === 0 ? (
+            <div style={styles.empty}>Nothing posted yet.</div>
           ) : (
             <div className="masonry">
-              {items.filter((i) => i.author === profile.username).map((item) => (
+              {items.filter((i) => i.user_id === session.user.id).map((item) => (
                 <div className="card" key={item.id} onClick={() => setShowDetail(item)}>
                   <img src={item.image_url} alt={item.title || "Outfit"} />
                   <div className="price-tag">€{item.price}</div>
@@ -496,6 +632,9 @@ export default function App() {
                     <div style={{ fontSize: 13, fontWeight: 700, color: t.textMuted, marginBottom: 4 }}>{showDetail.title}</div>
                   )}
                   <span style={{ fontSize: 20, fontWeight: 900 }}>€{showDetail.price}</span>
+                  {showDetail.author && (
+                    <div style={{ fontSize: 12, color: t.textFaint, marginTop: 4 }}>by {showDetail.author}</div>
+                  )}
                 </div>
                 <button onClick={() => setShowDetail(null)} style={{ background: "none", border: "none", color: t.textMuted, cursor: "pointer" }}>
                   <X size={20} />
@@ -510,6 +649,12 @@ export default function App() {
                   <Bookmark size={15} fill={saved.includes(showDetail.id) ? t.accent : "none"} /> Save
                 </button>
               </div>
+
+              {isMine(showDetail) && (
+                <button className="action-btn danger" style={{ width: "100%", marginTop: 10 }} onClick={() => handleDelete(showDetail)}>
+                  <Trash2 size={15} /> Delete this outfit
+                </button>
+              )}
 
               <div className="field-label" style={{ marginTop: 16 }}>Shop this look</div>
               {(showDetail.links || []).map((l, i) => (
@@ -587,7 +732,9 @@ export default function App() {
               </button>
             </div>
 
-            <div className="settings-row">
+            <div style={{ fontSize: 12, color: t.textFaint, marginTop: 10 }}>Signed in as {session.user.email}</div>
+
+            <div className="settings-row" style={{ cursor: "default" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 {themeName === "dark" ? <Moon size={17} /> : <Sun size={17} />}
                 <div>
@@ -598,7 +745,7 @@ export default function App() {
               <div className="toggle-track" onClick={toggleTheme}><div className="toggle-thumb" /></div>
             </div>
 
-            <div className="settings-row" style={{ cursor: "pointer" }} onClick={() => { setShowSettings(false); openEditProfile(); }}>
+            <div className="settings-row" onClick={() => { setShowSettings(false); openEditProfile(); }}>
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 <User size={17} />
                 <div>
@@ -607,6 +754,13 @@ export default function App() {
                 </div>
               </div>
               <span style={{ color: t.textFaint }}>›</span>
+            </div>
+
+            <div className="settings-row" onClick={handleSignOut}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <LogOut size={17} color="#ff6b5e" />
+                <div style={{ fontWeight: 700, fontSize: 14, color: "#ff6b5e" }}>Sign out</div>
+              </div>
             </div>
           </div>
         </div>
