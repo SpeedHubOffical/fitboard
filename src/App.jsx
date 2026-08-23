@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import {
   Plus, X, Link as LinkIcon, Search, Trash2, ShoppingBag,
   Home, Heart, Bookmark, User, Settings, Sun, Moon, ChevronLeft, Camera, LogOut, Ban, SlidersHorizontal,
-  Share2, MessageCircle, Send, Flag
+  Share2, MessageCircle, Send, Flag, Bell, Info, FileText, Shield
 } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
@@ -100,6 +100,10 @@ export default function App() {
   const [reports, setReports] = useState([]);
   const [reportsLoading, setReportsLoading] = useState(false);
 
+  const [notifications, setNotifications] = useState([]);
+  const [showNotifications, setShowNotifications] = useState(false);
+  const [legalPage, setLegalPage] = useState(null);
+
   const [showFilters, setShowFilters] = useState(false);
   const [minPrice, setMinPrice] = useState("");
   const [maxPrice, setMaxPrice] = useState("");
@@ -167,6 +171,7 @@ export default function App() {
       loadItems();
       loadProfiles();
       loadFollows();
+      loadNotifications();
     }
   }, [session]);
 
@@ -402,6 +407,8 @@ export default function App() {
     if (!insertError) {
       setCommentText("");
       loadComments(outfitId);
+    } else if (insertError.message && insertError.message.includes("rate_limited")) {
+      setError("You're commenting too fast — slow down a bit.");
     }
     setCommentSubmitting(false);
   }
@@ -409,6 +416,34 @@ export default function App() {
   async function deleteComment(commentId, outfitId) {
     await supabase.from("comments").delete().eq("id", commentId);
     loadComments(outfitId);
+  }
+
+  async function loadNotifications() {
+    const { data } = await supabase
+      .from("notifications")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .limit(50);
+    setNotifications(data || []);
+  }
+
+  async function openNotifications() {
+    setShowNotifications(true);
+    const unreadIds = notifications.filter((n) => !n.read).map((n) => n.id);
+    if (unreadIds.length > 0) {
+      setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+      await supabase.from("notifications").update({ read: true }).in("id", unreadIds);
+    }
+  }
+
+  function goToNotification(n) {
+    setShowNotifications(false);
+    if (n.type === "comment" && n.outfit_id) {
+      const outfit = items.find((i) => i.id === n.outfit_id);
+      if (outfit) setShowDetail(outfit);
+    } else if (n.actor_id) {
+      setViewingProfileId(n.actor_id);
+    }
   }
 
   function openReportOutfit(item) {
@@ -520,7 +555,14 @@ export default function App() {
       setShowModal(false);
       loadItems();
     } catch (e) {
-      setError(e.message && e.message.includes("row-level security") ? "You've been restricted from posting." : "Upload failed — try again.");
+      const msg = e.message || "";
+      if (msg.includes("rate_limited")) {
+        setError("You're posting too fast — wait a few minutes and try again.");
+      } else if (msg.includes("row-level security")) {
+        setError("You've been restricted from posting.");
+      } else {
+        setError("Upload failed — try again.");
+      }
     }
     setSaving(false);
   }
@@ -658,6 +700,16 @@ export default function App() {
 
     return true;
   });
+
+  const myStyles = (currentProfile().styles) || [];
+  const sortedFiltered =
+    tab === "feed" && myStyles.length > 0
+      ? [...filtered].sort((a, b) => {
+          const scoreA = (a.styles || []).filter((s) => myStyles.includes(s)).length;
+          const scoreB = (b.styles || []).filter((s) => myStyles.includes(s)).length;
+          return scoreB - scoreA;
+        })
+      : filtered;
 
   const isMine = (item) => session && (item.user_id === session.user.id || isAdmin);
 
@@ -1053,9 +1105,17 @@ export default function App() {
             <span style={{ fontWeight: 900, fontSize: 22, letterSpacing: "-0.02em" }}>
               <span style={{ color: t.accent }}>Fit</span>Board
             </span>
-            <button className="icon-btn" onClick={() => setShowSettings(true)} aria-label="Settings">
-              <Settings size={18} />
-            </button>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button className="icon-btn" onClick={openNotifications} aria-label="Notifications" style={{ position: "relative" }}>
+                <Bell size={18} />
+                {notifications.some((n) => !n.read) && (
+                  <div style={{ position: "absolute", top: 5, right: 6, width: 8, height: 8, borderRadius: "50%", background: t.accent }} />
+                )}
+              </button>
+              <button className="icon-btn" onClick={() => setShowSettings(true)} aria-label="Settings">
+                <Settings size={18} />
+              </button>
+            </div>
           </div>
 
           <div className="search-row">
@@ -1119,7 +1179,7 @@ export default function App() {
             </div>
           ) : (
             <div className="masonry">
-              {filtered.map((item) => (
+              {sortedFiltered.map((item) => (
                 <div className="card" key={item.id} onClick={() => setShowDetail(item)}>
                   <img src={item.image_url} alt={item.title || "Outfit"} />
                   <div className="price-tag">€{item.price}</div>
@@ -1396,6 +1456,84 @@ export default function App() {
         </div>
       )}
 
+      {showNotifications && (
+        <div className="modal-backdrop" onClick={() => setShowNotifications(false)}>
+          <div className="modal-sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="sheet-header">
+              <h2 style={{ margin: 0, fontSize: 18, fontWeight: 800 }}>Notifications</h2>
+              <button onClick={() => setShowNotifications(false)} style={{ background: "none", border: "none", color: t.textMuted, cursor: "pointer" }}>
+                <X size={22} />
+              </button>
+            </div>
+            {notifications.length === 0 ? (
+              <div style={{ ...styles.empty, padding: "40px 0" }}>Nothing yet — follows and comments will show up here.</div>
+            ) : (
+              notifications.map((n) => {
+                const actorP = profiles[n.actor_id];
+                const actorName = (actorP && actorP.username) || "Someone";
+                const outfitTitle = n.outfit_id ? (items.find((i) => i.id === n.outfit_id) || {}).title : null;
+                return (
+                  <div
+                    key={n.id}
+                    onClick={() => goToNotification(n)}
+                    style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 4px", cursor: "pointer", borderBottom: `1px solid ${t.border}` }}
+                  >
+                    <div style={{ width: 36, height: 36, borderRadius: "50%", background: t.cardAlt, border: `1px solid ${t.border}`, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
+                      {actorP && actorP.avatar_url ? <img src={actorP.avatar_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : (n.type === "follow" ? <User size={16} color={t.textFaint} /> : <MessageCircle size={16} color={t.textFaint} />)}
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 13.5 }}>
+                        <span style={{ fontWeight: 700 }}>{actorName}</span>{" "}
+                        {n.type === "follow" ? "started following you" : `commented on ${outfitTitle ? `"${outfitTitle}"` : "your outfit"}`}
+                      </div>
+                      <div style={{ fontSize: 11, color: t.textFaint, marginTop: 2 }}>{new Date(n.created_at).toLocaleString()}</div>
+                    </div>
+                    {!n.read && <div style={{ width: 8, height: 8, borderRadius: "50%", background: t.accent, flexShrink: 0 }} />}
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </div>
+      )}
+
+      {legalPage && (
+        <div className="modal-backdrop" onClick={() => setLegalPage(null)}>
+          <div className="modal-sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="sheet-header">
+              <h2 style={{ margin: 0, fontSize: 18, fontWeight: 800 }}>
+                {legalPage === "terms" ? "Terms of Service" : legalPage === "privacy" ? "Privacy Policy" : "About & Contact"}
+              </h2>
+              <button onClick={() => setLegalPage(null)} style={{ background: "none", border: "none", color: t.textMuted, cursor: "pointer" }}>
+                <X size={22} />
+              </button>
+            </div>
+            <div style={{ fontSize: 13.5, color: t.text, lineHeight: 1.7, marginTop: 10 }}>
+              {legalPage === "terms" && (
+                <>
+                  <p>By using FitBoard, you agree to post content you have the right to share and links that are accurate and safe. Don't post adult, hateful, illegal, or misleading content. Repeated violations may result in your account being banned.</p>
+                  <p>Outfit images, prices, and shopping links are provided by users. FitBoard doesn't sell or ship any products directly — purchases happen on the retailer's own site.</p>
+                  <p>We may remove content or accounts that break these rules, at our discretion, to keep the app safe for everyone.</p>
+                </>
+              )}
+              {legalPage === "privacy" && (
+                <>
+                  <p>We store the account info you provide (email, username, bio, avatar), the outfits and comments you post, and basic usage data like likes and follows, so the app can function.</p>
+                  <p>We don't sell your personal data. Shopping links you tap take you to third-party retailer sites, which have their own privacy policies.</p>
+                  <p>You can edit or remove your profile info and delete your own posts at any time from within the app.</p>
+                </>
+              )}
+              {legalPage === "about" && (
+                <>
+                  <p>FitBoard is a community outfit board — post your fits with shoppable links, discover looks from others, and shop what you like.</p>
+                  <p>Questions, issues, or feedback? Reach out at {ADMIN_EMAILS[0]}.</p>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {showReportModal && (
         <div className="modal-backdrop" onClick={() => setShowReportModal(false)}>
           <div className="modal-sheet" onClick={(e) => e.stopPropagation()}>
@@ -1594,6 +1732,30 @@ export default function App() {
                 <span style={{ color: t.textFaint }}>›</span>
               </div>
             )}
+
+            <div className="settings-row" onClick={() => { setShowSettings(false); setLegalPage("about"); }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <Info size={17} />
+                <div style={{ fontWeight: 700, fontSize: 14 }}>About & Contact</div>
+              </div>
+              <span style={{ color: t.textFaint }}>›</span>
+            </div>
+
+            <div className="settings-row" onClick={() => { setShowSettings(false); setLegalPage("terms"); }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <FileText size={17} />
+                <div style={{ fontWeight: 700, fontSize: 14 }}>Terms of Service</div>
+              </div>
+              <span style={{ color: t.textFaint }}>›</span>
+            </div>
+
+            <div className="settings-row" onClick={() => { setShowSettings(false); setLegalPage("privacy"); }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <Shield size={17} />
+                <div style={{ fontWeight: 700, fontSize: 14 }}>Privacy Policy</div>
+              </div>
+              <span style={{ color: t.textFaint }}>›</span>
+            </div>
 
             <div className="settings-row" onClick={handleSignOut}>
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
