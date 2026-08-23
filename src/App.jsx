@@ -6,6 +6,22 @@ import {
 } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
+const BLOCKED_LINK_DOMAINS = [
+  "pornhub.com", "xvideos.com", "xnxx.com", "xhamster.com", "onlyfans.com",
+  "redtube.com", "youporn.com", "chaturbate.com", "brazzers.com", "spankbang.com",
+];
+
+function isUnsafeLink(url) {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return true;
+    const host = parsed.hostname.toLowerCase();
+    return BLOCKED_LINK_DOMAINS.some((d) => host === d || host.endsWith("." + d));
+  } catch {
+    return true;
+  }
+}
+
 const ITEM_TYPES = ["Top", "Jumper", "Shirt", "Jacket", "Trousers", "Jeans", "Shoes", "Bag", "Accessory"];
 const PREFS_KEY = "fitboard-prefs";
 const ADMIN_EMAILS = ["kakhifn@gmail.com"];
@@ -278,7 +294,21 @@ export default function App() {
     if (showDetail && showDetail.id === item.id) {
       setShowDetail({ ...showDetail, like_count: newCount });
     }
-    await supabase.from("outfits").update({ like_count: newCount }).eq("id", item.id);
+
+    const { error: rpcError } = await supabase.rpc(
+      alreadyLiked ? "decrement_like_count" : "increment_like_count",
+      { outfit_id: item.id }
+    );
+
+    if (rpcError) {
+      // revert optimistic update if the write actually failed
+      setLiked(liked);
+      persist({ liked });
+      setItems((prev) => prev.map((i) => (i.id === item.id ? { ...i, like_count: item.like_count || 0 } : i)));
+      if (showDetail && showDetail.id === item.id) {
+        setShowDetail({ ...showDetail, like_count: item.like_count || 0 });
+      }
+    }
   }
 
   function toggleSaved(id) {
@@ -312,6 +342,7 @@ export default function App() {
   function addLink() {
     if (!linkUrl.trim()) return setError("Paste a link first.");
     const url = linkUrl.trim().startsWith("http") ? linkUrl.trim() : `https://${linkUrl.trim()}`;
+    if (isUnsafeLink(url)) return setError("That link isn't allowed on FitBoard.");
     setLinks([...links, { type: linkType, url }]);
     setLinkUrl("");
     setError("");
@@ -474,9 +505,19 @@ export default function App() {
 
   async function saveProfile() {
     const existing = currentProfile();
+    const cleanUsername = editUsername.trim();
+    if (cleanUsername) {
+      const taken = Object.entries(profiles).some(
+        ([uid, p]) => uid !== session.user.id && p.username && p.username.toLowerCase() === cleanUsername.toLowerCase()
+      );
+      if (taken) {
+        setError("That username is already taken — try another.");
+        return;
+      }
+    }
     const payload = {
       user_id: session.user.id,
-      username: editUsername.trim(),
+      username: cleanUsername,
       bio: editBio.trim(),
       avatar_url: editAvatar,
       gender: existing.gender || null,
@@ -486,11 +527,12 @@ export default function App() {
     };
     const { error: upsertError } = await supabase.from("profiles").upsert(payload);
     if (upsertError) {
-      setError("Couldn't save profile — try again.");
+      setError(upsertError.message && upsertError.message.includes("duplicate") ? "That username is already taken — try another." : "Couldn't save profile — try again.");
       return;
     }
     setProfiles((prev) => ({ ...prev, [session.user.id]: payload }));
     setShowEditProfile(false);
+    setError("");
   }
 
   function toggleStyle(s) {
