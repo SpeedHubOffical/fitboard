@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import {
   Plus, X, Link as LinkIcon, Search, Trash2, ShoppingBag,
   Home, Heart, Bookmark, User, Settings, Sun, Moon, ChevronLeft, Camera, LogOut, Ban, SlidersHorizontal,
-  Share2, MessageCircle, Send
+  Share2, MessageCircle, Send, Flag
 } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
@@ -90,6 +90,15 @@ export default function App() {
   const [commentSubmitting, setCommentSubmitting] = useState(false);
   const [shareCopied, setShareCopied] = useState(false);
   const [pendingOutfitId, setPendingOutfitId] = useState(null);
+
+  const [showReportModal, setShowReportModal] = useState(false);
+  const [reportTarget, setReportTarget] = useState(null);
+  const [reportReason, setReportReason] = useState("");
+  const [reportSubmitting, setReportSubmitting] = useState(false);
+  const [reportSubmitted, setReportSubmitted] = useState(false);
+  const [showReportsPanel, setShowReportsPanel] = useState(false);
+  const [reports, setReports] = useState([]);
+  const [reportsLoading, setReportsLoading] = useState(false);
 
   const [showFilters, setShowFilters] = useState(false);
   const [minPrice, setMinPrice] = useState("");
@@ -400,6 +409,48 @@ export default function App() {
   async function deleteComment(commentId, outfitId) {
     await supabase.from("comments").delete().eq("id", commentId);
     loadComments(outfitId);
+  }
+
+  function openReportOutfit(item) {
+    setReportTarget({ outfitId: item.id, userId: item.user_id, label: item.title || "this outfit" });
+    setReportReason("");
+    setReportSubmitted(false);
+    setShowReportModal(true);
+  }
+
+  function openReportUser(userId, username) {
+    setReportTarget({ outfitId: null, userId, label: username || "this user" });
+    setReportReason("");
+    setReportSubmitted(false);
+    setShowReportModal(true);
+  }
+
+  async function submitReport() {
+    if (!reportReason.trim() || !reportTarget) return;
+    setReportSubmitting(true);
+    const { error: reportError } = await supabase.from("reports").insert({
+      reporter_id: session.user.id,
+      outfit_id: reportTarget.outfitId,
+      reported_user_id: reportTarget.userId,
+      reason: reportReason.trim(),
+    });
+    setReportSubmitting(false);
+    if (!reportError) {
+      setReportSubmitted(true);
+      setTimeout(() => { setShowReportModal(false); setReportSubmitted(false); }, 1200);
+    }
+  }
+
+  async function loadReports() {
+    setReportsLoading(true);
+    const { data } = await supabase.from("reports").select("*").order("created_at", { ascending: false });
+    setReports(data || []);
+    setReportsLoading(false);
+  }
+
+  async function dismissReport(id) {
+    setReports((prev) => prev.filter((r) => r.id !== id));
+    await supabase.from("reports").delete().eq("id", id);
   }
 
   async function shareOutfit(item) {
@@ -1027,6 +1078,35 @@ export default function App() {
             </button>
           </div>
 
+          {query.trim() && Object.entries(profiles).some(([, p]) => p.username && p.username.toLowerCase().includes(query.trim().toLowerCase())) && (
+            <div style={{ padding: "0 12px 4px" }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: t.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", margin: "6px 0" }}>
+                People
+              </div>
+              {Object.entries(profiles)
+                .filter(([, p]) => p.username && p.username.toLowerCase().includes(query.trim().toLowerCase()))
+                .slice(0, 8)
+                .map(([uid, p]) => (
+                  <div
+                    key={uid}
+                    onClick={() => setViewingProfileId(uid)}
+                    style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 4px", cursor: "pointer" }}
+                  >
+                    <div style={{ width: 36, height: 36, borderRadius: "50%", background: t.cardAlt, border: `1px solid ${t.border}`, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
+                      {p.avatar_url ? <img src={p.avatar_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <User size={16} color={t.textFaint} />}
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 700, fontSize: 14 }}>{p.username}</div>
+                      <div style={{ fontSize: 11, color: t.textFaint }}>{followerCount(uid)} followers</div>
+                    </div>
+                  </div>
+                ))}
+              <div style={{ fontSize: 12, fontWeight: 700, color: t.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", margin: "14px 0 2px" }}>
+                Outfits
+              </div>
+            </div>
+          )}
+
           {loading ? (
             <div style={{ ...styles.empty, animation: "fadeIn 0.4s ease" }}>Loading looks…</div>
           ) : loadError ? (
@@ -1090,6 +1170,12 @@ export default function App() {
                     onClick={() => { setShowDetail(null); setViewingProfileId(showDetail.user_id); }}
                   >
                     by {authorLabel(showDetail)}
+                  </div>
+                  <div
+                    style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11.5, color: t.textFaint, marginTop: 6, cursor: "pointer" }}
+                    onClick={() => openReportOutfit(showDetail)}
+                  >
+                    <Flag size={11} /> Report this outfit
                   </div>
                   {showDetail.styles && showDetail.styles.length > 0 && (
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
@@ -1240,6 +1326,15 @@ export default function App() {
                   </button>
                 )}
 
+                {viewingProfileId !== session.user.id && (
+                  <div
+                    style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11.5, color: t.textFaint, marginTop: 10, cursor: "pointer" }}
+                    onClick={() => openReportUser(viewingProfileId, (viewingProfile && viewingProfile.username) || "this user")}
+                  >
+                    <Flag size={11} /> Report this user
+                  </div>
+                )}
+
                 {isAdmin && viewingProfileId !== session.user.id && (
                   <button className="action-btn danger" style={{ marginTop: 10, padding: "9px 18px" }} onClick={() => handleBanUser(viewingProfileId)}>
                     <Ban size={14} /> Ban this user
@@ -1297,6 +1392,93 @@ export default function App() {
               <button className="filter-clear-btn" onClick={clearFilters}>Clear all</button>
               <button className="filter-apply-btn" onClick={applyFilters}>Apply filters</button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {showReportModal && (
+        <div className="modal-backdrop" onClick={() => setShowReportModal(false)}>
+          <div className="modal-sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="sheet-header">
+              <h2 style={{ margin: 0, fontSize: 18, fontWeight: 800 }}>Report {reportTarget && reportTarget.outfitId ? "outfit" : "user"}</h2>
+              <button onClick={() => setShowReportModal(false)} style={{ background: "none", border: "none", color: t.textMuted, cursor: "pointer" }}>
+                <X size={22} />
+              </button>
+            </div>
+            {reportSubmitted ? (
+              <div style={{ textAlign: "center", padding: "30px 0", color: t.textMuted, fontSize: 14 }}>
+                Report sent — thanks for flagging this.
+              </div>
+            ) : (
+              <>
+                <div style={{ fontSize: 13, color: t.textMuted, marginTop: 10 }}>
+                  Reporting {reportTarget ? reportTarget.label : ""}. Let us know what's wrong.
+                </div>
+                <div className="field-label">Reason</div>
+                <textarea
+                  className="field-input"
+                  style={{ minHeight: 90, resize: "vertical", fontFamily: "inherit" }}
+                  placeholder="What's the issue with this?"
+                  value={reportReason}
+                  onChange={(e) => setReportReason(e.target.value)}
+                />
+                <button className="upload-cta" onClick={submitReport} disabled={reportSubmitting || !reportReason.trim()}>
+                  {reportSubmitting ? "Sending…" : "Submit report"}
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {showReportsPanel && isAdmin && (
+        <div className="modal-backdrop" onClick={() => setShowReportsPanel(false)}>
+          <div className="modal-sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="sheet-header">
+              <h2 style={{ margin: 0, fontSize: 18, fontWeight: 800 }}>Reports</h2>
+              <button onClick={() => setShowReportsPanel(false)} style={{ background: "none", border: "none", color: t.textMuted, cursor: "pointer" }}>
+                <X size={22} />
+              </button>
+            </div>
+            {reportsLoading ? (
+              <div style={{ ...styles.empty, padding: "40px 0" }}>Loading reports…</div>
+            ) : reports.length === 0 ? (
+              <div style={{ ...styles.empty, padding: "40px 0" }}>No reports. All clear.</div>
+            ) : (
+              reports.map((r) => {
+                const reporterP = profiles[r.reporter_id];
+                const reportedP = profiles[r.reported_user_id];
+                const reportedOutfit = r.outfit_id ? items.find((i) => i.id === r.outfit_id) : null;
+                return (
+                  <div key={r.id} style={{ background: t.cardAlt, border: `1px solid ${t.border}`, borderRadius: 14, padding: 14, marginTop: 12 }}>
+                    <div style={{ fontSize: 11.5, color: t.textFaint }}>
+                      {new Date(r.created_at).toLocaleString()}
+                    </div>
+                    <div style={{ fontSize: 13, marginTop: 6 }}>
+                      <span style={{ fontWeight: 700 }}>{(reporterP && reporterP.username) || "Someone"}</span> reported{" "}
+                      <span style={{ fontWeight: 700 }}>{(reportedP && reportedP.username) || "a user"}</span>
+                      {reportedOutfit ? <> for the outfit "{reportedOutfit.title}"</> : null}
+                    </div>
+                    <div style={{ fontSize: 13.5, marginTop: 8, color: t.text }}>{r.reason}</div>
+                    <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                      {reportedOutfit && (
+                        <button className="action-btn" style={{ fontSize: 12 }} onClick={() => { setShowReportsPanel(false); setShowDetail(reportedOutfit); }}>
+                          View outfit
+                        </button>
+                      )}
+                      {r.reported_user_id && r.reported_user_id !== session.user.id && (
+                        <button className="action-btn danger" style={{ fontSize: 12 }} onClick={() => handleBanUser(r.reported_user_id)}>
+                          <Ban size={13} /> Ban
+                        </button>
+                      )}
+                      <button className="action-btn" style={{ fontSize: 12 }} onClick={() => dismissReport(r.id)}>
+                        Dismiss
+                      </button>
+                    </div>
+                  </div>
+                );
+              })
+            )}
           </div>
         </div>
       )}
@@ -1399,6 +1581,19 @@ export default function App() {
               </div>
               <span style={{ color: t.textFaint }}>›</span>
             </div>
+
+            {isAdmin && (
+              <div className="settings-row" onClick={() => { setShowSettings(false); setShowReportsPanel(true); loadReports(); }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <Flag size={17} color={t.accent} />
+                  <div>
+                    <div style={{ fontWeight: 700, fontSize: 14 }}>Reports</div>
+                    <div style={{ fontSize: 12, color: t.textMuted }}>Review flagged outfits and users</div>
+                  </div>
+                </div>
+                <span style={{ color: t.textFaint }}>›</span>
+              </div>
+            )}
 
             <div className="settings-row" onClick={handleSignOut}>
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
