@@ -49,10 +49,10 @@ const THEMES = {
 function loadPrefs() {
   try {
     const raw = localStorage.getItem(PREFS_KEY);
-    if (!raw) return { theme: "dark", liked: [], saved: [] };
+    if (!raw) return { theme: "dark" };
     return JSON.parse(raw);
   } catch {
-    return { theme: "dark", liked: [], saved: [] };
+    return { theme: "dark" };
   }
 }
 
@@ -118,8 +118,10 @@ export default function App() {
 
   const initialPrefs = loadPrefs();
   const [themeName, setThemeName] = useState(initialPrefs.theme);
-  const [liked, setLiked] = useState(initialPrefs.liked);
-  const [saved, setSaved] = useState(initialPrefs.saved);
+  const [liked, setLiked] = useState([]);
+  const [saved, setSaved] = useState([]);
+  const [searchLogList, setSearchLogList] = useState([]);
+  const searchLogTimer = useRef(null);
 
   const [imgFile, setImgFile] = useState(null);
   const [imgPreview, setImgPreview] = useState(null);
@@ -172,15 +174,14 @@ export default function App() {
       loadProfiles();
       loadFollows();
       loadNotifications();
+      loadLikes();
+      loadSaves();
+      loadSearchLog();
     }
   }, [session]);
 
   function persist(next) {
-    const merged = {
-      theme: next.theme !== undefined ? next.theme : themeName,
-      liked: next.liked !== undefined ? next.liked : liked,
-      saved: next.saved !== undefined ? next.saved : saved,
-    };
+    const merged = { theme: next.theme !== undefined ? next.theme : themeName };
     savePrefs(merged);
   }
 
@@ -301,7 +302,6 @@ export default function App() {
     const alreadyLiked = liked.includes(item.id);
     const next = alreadyLiked ? liked.filter((x) => x !== item.id) : [...liked, item.id];
     setLiked(next);
-    persist({ liked: next });
 
     const newCount = Math.max(0, (item.like_count || 0) + (alreadyLiked ? -1 : 1));
     setItems((prev) => prev.map((i) => (i.id === item.id ? { ...i, like_count: newCount } : i)));
@@ -309,15 +309,12 @@ export default function App() {
       setShowDetail({ ...showDetail, like_count: newCount });
     }
 
-    const { error: rpcError } = await supabase.rpc(
-      alreadyLiked ? "decrement_like_count" : "increment_like_count",
-      { outfit_id: item.id }
-    );
+    const { error: writeError } = alreadyLiked
+      ? await supabase.from("likes").delete().eq("outfit_id", item.id)
+      : await supabase.from("likes").insert({ outfit_id: item.id });
 
-    if (rpcError) {
-      // revert optimistic update if the write actually failed
+    if (writeError) {
       setLiked(liked);
-      persist({ liked });
       setItems((prev) => prev.map((i) => (i.id === item.id ? { ...i, like_count: item.like_count || 0 } : i)));
       if (showDetail && showDetail.id === item.id) {
         setShowDetail({ ...showDetail, like_count: item.like_count || 0 });
@@ -325,10 +322,14 @@ export default function App() {
     }
   }
 
-  function toggleSaved(id) {
-    const next = saved.includes(id) ? saved.filter((x) => x !== id) : [...saved, id];
+  async function toggleSaved(id) {
+    const alreadySaved = saved.includes(id);
+    const next = alreadySaved ? saved.filter((x) => x !== id) : [...saved, id];
     setSaved(next);
-    persist({ saved: next });
+    const { error: writeError } = alreadySaved
+      ? await supabase.from("saves").delete().eq("outfit_id", id)
+      : await supabase.from("saves").insert({ outfit_id: id });
+    if (writeError) setSaved(saved);
   }
 
   function handleFile(e) {
@@ -416,6 +417,25 @@ export default function App() {
   async function deleteComment(commentId, outfitId) {
     await supabase.from("comments").delete().eq("id", commentId);
     loadComments(outfitId);
+  }
+
+  async function loadLikes() {
+    const { data } = await supabase.from("likes").select("outfit_id");
+    setLiked((data || []).map((r) => r.outfit_id));
+  }
+
+  async function loadSaves() {
+    const { data } = await supabase.from("saves").select("outfit_id");
+    setSaved((data || []).map((r) => r.outfit_id));
+  }
+
+  async function loadSearchLog() {
+    const { data } = await supabase
+      .from("search_log")
+      .select("query")
+      .order("created_at", { ascending: false })
+      .limit(25);
+    setSearchLogList((data || []).map((r) => r.query));
   }
 
   async function loadNotifications() {
@@ -511,6 +531,18 @@ export default function App() {
       }
     }
   }
+
+  useEffect(() => {
+    if (!session) return;
+    if (searchLogTimer.current) clearTimeout(searchLogTimer.current);
+    const q = query.trim();
+    if (q.length < 3) return;
+    searchLogTimer.current = setTimeout(async () => {
+      await supabase.from("search_log").insert({ query: q.toLowerCase() });
+      setSearchLogList((prev) => [q.toLowerCase(), ...prev].slice(0, 25));
+    }, 1200);
+    return () => clearTimeout(searchLogTimer.current);
+  }, [query, session]);
 
   function currentProfile() {
     return (session && profiles[session.user.id]) || { username: "", bio: "", avatar_url: null };
@@ -701,14 +733,29 @@ export default function App() {
     return true;
   });
 
-  const myStyles = (currentProfile().styles) || [];
+  const explicitStyles = currentProfile().styles || [];
+  const likedSavedOutfits = items.filter((i) => liked.includes(i.id) || saved.includes(i.id));
+  const implicitStyleCounts = {};
+  likedSavedOutfits.forEach((i) => {
+    (i.styles || []).forEach((s) => { implicitStyleCounts[s] = (implicitStyleCounts[s] || 0) + 1; });
+  });
+  const implicitStyles = Object.keys(implicitStyleCounts);
+  const searchTerms = searchLogList.slice(0, 10);
+
+  function recScore(item) {
+    let score = 0;
+    (item.styles || []).forEach((s) => {
+      if (explicitStyles.includes(s)) score += 3;
+      if (implicitStyleCounts[s]) score += implicitStyleCounts[s] * 1.5;
+    });
+    const hay = `${item.title || ""} ${(item.styles || []).join(" ")}`.toLowerCase();
+    searchTerms.forEach((term) => { if (hay.includes(term)) score += 1; });
+    return score;
+  }
+
   const sortedFiltered =
-    tab === "feed" && myStyles.length > 0
-      ? [...filtered].sort((a, b) => {
-          const scoreA = (a.styles || []).filter((s) => myStyles.includes(s)).length;
-          const scoreB = (b.styles || []).filter((s) => myStyles.includes(s)).length;
-          return scoreB - scoreA;
-        })
+    tab === "feed" && (explicitStyles.length > 0 || implicitStyles.length > 0 || searchTerms.length > 0)
+      ? [...filtered].sort((a, b) => recScore(b) - recScore(a))
       : filtered;
 
   const isMine = (item) => session && (item.user_id === session.user.id || isAdmin);
