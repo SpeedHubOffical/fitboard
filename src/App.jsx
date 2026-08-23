@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef } from "react";
 import {
   Plus, X, Link as LinkIcon, Search, Trash2, ShoppingBag,
-  Home, Heart, Bookmark, User, Settings, Sun, Moon, ChevronLeft, Camera, LogOut, Ban, SlidersHorizontal
+  Home, Heart, Bookmark, User, Settings, Sun, Moon, ChevronLeft, Camera, LogOut, Ban, SlidersHorizontal,
+  Share2, MessageCircle, Send
 } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
@@ -68,6 +69,12 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showEditProfile, setShowEditProfile] = useState(false);
 
+  const [comments, setComments] = useState({});
+  const [commentText, setCommentText] = useState("");
+  const [commentSubmitting, setCommentSubmitting] = useState(false);
+  const [shareCopied, setShareCopied] = useState(false);
+  const [pendingOutfitId, setPendingOutfitId] = useState(null);
+
   const [showFilters, setShowFilters] = useState(false);
   const [minPrice, setMinPrice] = useState("");
   const [maxPrice, setMaxPrice] = useState("");
@@ -115,6 +122,20 @@ export default function App() {
     });
     return () => listener.subscription.unsubscribe();
   }, []);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const outfitParam = params.get("outfit");
+    if (outfitParam) setPendingOutfitId(outfitParam);
+  }, []);
+
+  useEffect(() => {
+    if (pendingOutfitId && items.length > 0) {
+      const match = items.find((i) => String(i.id) === String(pendingOutfitId));
+      if (match) setShowDetail(match);
+      setPendingOutfitId(null);
+    }
+  }, [pendingOutfitId, items]);
 
   useEffect(() => {
     if (session) {
@@ -313,6 +334,65 @@ export default function App() {
     setLinkUrl("");
     setPostStyles([]);
     setError("");
+  }
+
+  useEffect(() => {
+    if (showDetail) loadComments(showDetail.id);
+  }, [showDetail && showDetail.id]);
+
+  async function loadComments(outfitId) {
+    const { data } = await supabase
+      .from("comments")
+      .select("*")
+      .eq("outfit_id", outfitId)
+      .order("created_at", { ascending: true });
+    setComments((prev) => ({ ...prev, [outfitId]: data || [] }));
+  }
+
+  async function addComment(outfitId) {
+    if (!commentText.trim()) return;
+    setCommentSubmitting(true);
+    const myProfile = currentProfile();
+    const { error: insertError } = await supabase.from("comments").insert({
+      outfit_id: outfitId,
+      user_id: session.user.id,
+      author: myProfile.username || session.user.email.split("@")[0],
+      text: commentText.trim(),
+    });
+    if (!insertError) {
+      setCommentText("");
+      loadComments(outfitId);
+    }
+    setCommentSubmitting(false);
+  }
+
+  async function deleteComment(commentId, outfitId) {
+    await supabase.from("comments").delete().eq("id", commentId);
+    loadComments(outfitId);
+  }
+
+  async function shareOutfit(item) {
+    const shareUrl = `${window.location.origin}${window.location.pathname}?outfit=${item.id}`;
+    const shareData = {
+      title: item.title || "Check out this fit",
+      text: `Check out this fit on FitBoard — €${item.price}`,
+      url: shareUrl,
+    };
+    if (navigator.share) {
+      try {
+        await navigator.share(shareData);
+      } catch (e) {
+        // user cancelled share sheet, do nothing
+      }
+    } else {
+      try {
+        await navigator.clipboard.writeText(shareUrl);
+        setShareCopied(true);
+        setTimeout(() => setShareCopied(false), 2000);
+      } catch (e) {
+        // clipboard blocked, silently ignore
+      }
+    }
   }
 
   function currentProfile() {
@@ -986,10 +1066,13 @@ export default function App() {
 
               <div className="action-row">
                 <button className={`action-btn ${liked.includes(showDetail.id) ? "active" : ""}`} onClick={() => toggleLiked(showDetail)}>
-                  <Heart size={15} className={liked.includes(showDetail.id) ? "heart-pop" : ""} fill={liked.includes(showDetail.id) ? t.accent : "none"} /> Like · {showDetail.like_count || 0}
+                  <Heart size={15} className={liked.includes(showDetail.id) ? "heart-pop" : ""} fill={liked.includes(showDetail.id) ? t.accent : "none"} /> {showDetail.like_count || 0}
                 </button>
                 <button className={`action-btn ${saved.includes(showDetail.id) ? "active" : ""}`} onClick={() => toggleSaved(showDetail.id)}>
                   <Bookmark size={15} fill={saved.includes(showDetail.id) ? t.accent : "none"} /> Save
+                </button>
+                <button className="action-btn" onClick={() => shareOutfit(showDetail)}>
+                  <Share2 size={15} /> {shareCopied ? "Copied!" : "Share"}
                 </button>
               </div>
 
@@ -1012,6 +1095,58 @@ export default function App() {
                   <span style={{ color: t.accent, fontWeight: 700, fontSize: 13 }}>Shop →</span>
                 </a>
               ))}
+
+              <div className="field-label" style={{ marginTop: 20 }}>
+                <MessageCircle size={13} /> Comments {(comments[showDetail.id] || []).length > 0 ? `(${(comments[showDetail.id] || []).length})` : ""}
+              </div>
+
+              {(comments[showDetail.id] || []).length === 0 ? (
+                <div style={{ fontSize: 13, color: t.textFaint, marginTop: 4 }}>No comments yet — be the first.</div>
+              ) : (
+                (comments[showDetail.id] || []).map((c) => {
+                  const cp = profiles[c.user_id];
+                  const canDelete = session && (c.user_id === session.user.id || isAdmin);
+                  return (
+                    <div key={c.id} style={{ display: "flex", gap: 10, marginTop: 12 }}>
+                      <div style={{ width: 30, height: 30, borderRadius: "50%", background: t.cardAlt, border: `1px solid ${t.border}`, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
+                        {cp && cp.avatar_url ? <img src={cp.avatar_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <User size={14} color={t.textFaint} />}
+                      </div>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                          <span style={{ fontWeight: 700, fontSize: 13 }}>{(cp && cp.username) || c.author || "Anonymous"}</span>
+                          {canDelete && (
+                            <button onClick={() => deleteComment(c.id, showDetail.id)} style={{ background: "none", border: "none", color: t.textFaint, cursor: "pointer" }}>
+                              <Trash2 size={13} />
+                            </button>
+                          )}
+                        </div>
+                        <div style={{ fontSize: 13.5, color: t.text, marginTop: 2, wordBreak: "break-word" }}>{c.text}</div>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+
+              <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
+                <input
+                  className="field-input"
+                  style={{ flex: 1 }}
+                  type="text"
+                  placeholder="Add a comment…"
+                  value={commentText}
+                  onChange={(e) => setCommentText(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") addComment(showDetail.id); }}
+                />
+                <button
+                  className="icon-btn"
+                  style={{ background: t.accent, border: "none" }}
+                  onClick={() => addComment(showDetail.id)}
+                  disabled={commentSubmitting}
+                  aria-label="Post comment"
+                >
+                  <Send size={16} color="#fff" />
+                </button>
+              </div>
             </div>
           </div>
         </div>
