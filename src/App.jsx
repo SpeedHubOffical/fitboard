@@ -57,6 +57,7 @@ export default function App() {
 
   const [items, setItems] = useState([]);
   const [profiles, setProfiles] = useState({});
+  const [follows, setFollows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [showModal, setShowModal] = useState(false);
@@ -119,6 +120,7 @@ export default function App() {
     if (session) {
       loadItems();
       loadProfiles();
+      loadFollows();
     }
   }, [session]);
 
@@ -153,6 +155,38 @@ export default function App() {
     if (data) data.forEach((p) => { map[p.user_id] = p; });
     setProfiles(map);
     setProfilesLoaded(true);
+  }
+
+  async function loadFollows() {
+    const { data } = await supabase.from("follows").select("*");
+    setFollows(data || []);
+  }
+
+  function isFollowing(userId) {
+    return session && follows.some((f) => f.follower_id === session.user.id && f.following_id === userId);
+  }
+
+  function followerCount(userId) {
+    return follows.filter((f) => f.following_id === userId).length;
+  }
+
+  function followingCount(userId) {
+    return follows.filter((f) => f.follower_id === userId).length;
+  }
+
+  async function toggleFollow(userId) {
+    if (!session || userId === session.user.id) return;
+    const already = isFollowing(userId);
+    if (already) {
+      setFollows((prev) => prev.filter((f) => !(f.follower_id === session.user.id && f.following_id === userId)));
+      await supabase.from("follows").delete().eq("follower_id", session.user.id).eq("following_id", userId);
+    } else {
+      setFollows((prev) => [...prev, { follower_id: session.user.id, following_id: userId }]);
+      const { error: followError } = await supabase.from("follows").insert({ follower_id: session.user.id, following_id: userId });
+      if (followError) {
+        setFollows((prev) => prev.filter((f) => !(f.follower_id === session.user.id && f.following_id === userId)));
+      }
+    }
   }
 
   useEffect(() => {
@@ -749,6 +783,24 @@ export default function App() {
         }
         .hidden-file-input { position: absolute; width: 1px; height: 1px; opacity: 0; overflow: hidden; }
         .author-link { cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+        * { transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease; }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes slideUp { from { transform: translateY(24px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+        @keyframes popIn { from { transform: scale(0.9); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+        @keyframes heartPop { 0% { transform: scale(1); } 40% { transform: scale(1.35); } 100% { transform: scale(1); } }
+        .card { animation: popIn 0.25s ease both; }
+        .modal-backdrop, .detail-backdrop { animation: fadeIn 0.2s ease both; }
+        .modal-sheet { animation: slideUp 0.28s cubic-bezier(0.22, 1, 0.36, 1) both; }
+        .detail-card { animation: popIn 0.25s cubic-bezier(0.22, 1, 0.36, 1) both; }
+        .card, .fab, .icon-btn, .nav-btn, .action-btn, .style-chip, .filter-btn, .ob-style-chip, .ob-gender-btn {
+          transition: transform 0.15s ease, background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+        }
+        .fab { transition: transform 0.15s cubic-bezier(0.34, 1.56, 0.64, 1); }
+        .fab:active { transform: scale(0.88); }
+        .heart-pop { animation: heartPop 0.35s ease; }
+        .nav-btn { transition: color 0.2s ease, transform 0.15s ease; }
+        .nav-btn:active { transform: scale(0.92); }
+        .toggle-thumb { transition: left 0.25s cubic-bezier(0.34, 1.56, 0.64, 1); }
         .style-chip-grid { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; max-height: 32vh; overflow-y: auto; padding-bottom: 4px; }
         .style-chip {
           padding: 9px 14px; border-radius: 20px; border: 1px solid ${t.border};
@@ -786,7 +838,18 @@ export default function App() {
             <button className="edit-profile-btn" onClick={openEditProfile}>Edit profile</button>
           </div>
 
-          <div style={{ display: "flex", gap: 10, padding: "18px 16px 4px" }}>
+          <div style={{ display: "flex", gap: 20, padding: "6px 16px 14px", justifyContent: "center" }}>
+            <div style={{ textAlign: "center" }}>
+              <div style={{ fontWeight: 900, fontSize: 16 }}>{followerCount(session.user.id)}</div>
+              <div style={{ fontSize: 11, color: t.textMuted, fontWeight: 700 }}>Followers</div>
+            </div>
+            <div style={{ textAlign: "center" }}>
+              <div style={{ fontWeight: 900, fontSize: 16 }}>{followingCount(session.user.id)}</div>
+              <div style={{ fontSize: 11, color: t.textMuted, fontWeight: 700 }}>Following</div>
+            </div>
+          </div>
+
+          <div style={{ display: "flex", gap: 10, padding: "0 16px 4px" }}>
             <div className="action-btn" style={{ cursor: "default" }}><Heart size={14} /> {liked.length} liked</div>
             <div className="action-btn" style={{ cursor: "default" }}><Bookmark size={14} /> {saved.length} saved</div>
           </div>
@@ -843,7 +906,7 @@ export default function App() {
           </div>
 
           {loading ? (
-            <div style={styles.empty}>Loading looks…</div>
+            <div style={{ ...styles.empty, animation: "fadeIn 0.4s ease" }}>Loading looks…</div>
           ) : loadError ? (
             <div style={styles.empty}>{loadError}</div>
           ) : filtered.length === 0 ? (
@@ -923,7 +986,7 @@ export default function App() {
 
               <div className="action-row">
                 <button className={`action-btn ${liked.includes(showDetail.id) ? "active" : ""}`} onClick={() => toggleLiked(showDetail)}>
-                  <Heart size={15} fill={liked.includes(showDetail.id) ? t.accent : "none"} /> Like · {showDetail.like_count || 0}
+                  <Heart size={15} className={liked.includes(showDetail.id) ? "heart-pop" : ""} fill={liked.includes(showDetail.id) ? t.accent : "none"} /> Like · {showDetail.like_count || 0}
                 </button>
                 <button className={`action-btn ${saved.includes(showDetail.id) ? "active" : ""}`} onClick={() => toggleSaved(showDetail.id)}>
                   <Bookmark size={15} fill={saved.includes(showDetail.id) ? t.accent : "none"} /> Save
@@ -978,8 +1041,30 @@ export default function App() {
                 {viewingProfile && viewingProfile.bio && (
                   <div style={{ fontSize: 13, color: t.textMuted, marginTop: 4, textAlign: "center" }}>{viewingProfile.bio}</div>
                 )}
+
+                <div style={{ display: "flex", gap: 20, marginTop: 14 }}>
+                  <div style={{ textAlign: "center" }}>
+                    <div style={{ fontWeight: 900, fontSize: 15 }}>{followerCount(viewingProfileId)}</div>
+                    <div style={{ fontSize: 10.5, color: t.textMuted, fontWeight: 700 }}>Followers</div>
+                  </div>
+                  <div style={{ textAlign: "center" }}>
+                    <div style={{ fontWeight: 900, fontSize: 15 }}>{followingCount(viewingProfileId)}</div>
+                    <div style={{ fontSize: 10.5, color: t.textMuted, fontWeight: 700 }}>Following</div>
+                  </div>
+                </div>
+
+                {viewingProfileId !== session.user.id && (
+                  <button
+                    className={`action-btn ${isFollowing(viewingProfileId) ? "active" : ""}`}
+                    style={{ marginTop: 14, padding: "9px 22px", flex: "0 0 auto" }}
+                    onClick={() => toggleFollow(viewingProfileId)}
+                  >
+                    {isFollowing(viewingProfileId) ? "Following" : "Follow"}
+                  </button>
+                )}
+
                 {isAdmin && viewingProfileId !== session.user.id && (
-                  <button className="action-btn danger" style={{ marginTop: 14, padding: "9px 18px" }} onClick={() => handleBanUser(viewingProfileId)}>
+                  <button className="action-btn danger" style={{ marginTop: 10, padding: "9px 18px" }} onClick={() => handleBanUser(viewingProfileId)}>
                     <Ban size={14} /> Ban this user
                   </button>
                 )}
