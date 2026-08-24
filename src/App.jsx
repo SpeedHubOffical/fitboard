@@ -257,7 +257,10 @@ export default function App() {
   }, [tab, searchMode, hasMoreFeed, loadingMore, feedPage]);
 
   useEffect(() => {
-    if (showDetail) loadComments(showDetail.id);
+    if (showDetail) {
+      loadComments(showDetail.id);
+      supabase.from("outfit_views").insert({ outfit_id: showDetail.id }).then(() => {});
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showDetail && showDetail.id]);
 
@@ -285,8 +288,20 @@ export default function App() {
   }
 
   async function loadFeedFirstPage() {
-    setLoading(true);
     setLoadError("");
+    try {
+      const cached = sessionStorage.getItem("fitboard-feed-cache");
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (Date.now() - parsed.time < 60000) {
+          setItems(parsed.data);
+          setHasMoreFeed(parsed.data.length === PAGE_SIZE);
+          setFeedPage(1);
+          setLoading(false);
+        }
+      }
+    } catch {}
+    if (items.length === 0) setLoading(true);
     const { data, error: fetchError } = await supabase
       .from("outfits")
       .select("*")
@@ -300,6 +315,9 @@ export default function App() {
       setItems(data || []);
       setHasMoreFeed((data || []).length === PAGE_SIZE);
       setFeedPage(1);
+      try {
+        sessionStorage.setItem("fitboard-feed-cache", JSON.stringify({ time: Date.now(), data: data || [] }));
+      } catch {}
     }
     setLoading(false);
   }
@@ -682,9 +700,12 @@ export default function App() {
       if (!file.type.startsWith("image/")) continue;
       if (file.size > 15 * 1024 * 1024) { setError("One of those images was too large."); continue; }
       try {
-        const blob = await compressImage(file);
-        const preview = URL.createObjectURL(blob);
-        setImgFiles((prev) => [...prev, { blob, preview }]);
+        const [fullBlob, thumbBlob] = await Promise.all([
+          compressImage(file, 1280, 0.75),
+          compressImage(file, 400, 0.6),
+        ]);
+        const preview = URL.createObjectURL(fullBlob);
+        setImgFiles((prev) => [...prev, { blob: fullBlob, thumbBlob, preview }]);
       } catch {
         setError("Couldn't process one of those photos — try another.");
       }
@@ -773,14 +794,24 @@ export default function App() {
     setError("");
     try {
       const uploadedUrls = [];
+      const uploadedThumbs = [];
       for (const f of imgFiles) {
-        const fileName = `${Date.now()}-${Math.random().toString(36).slice(2)}.jpg`;
-        const { error: uploadError } = await supabase.storage.from("outfit-images").upload(fileName, f.blob);
+        const base = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        const { error: uploadError } = await supabase.storage.from("outfit-images").upload(`${base}.jpg`, f.blob);
         if (uploadError) throw uploadError;
-        const { data: urlData } = supabase.storage.from("outfit-images").getPublicUrl(fileName);
+        const { data: urlData } = supabase.storage.from("outfit-images").getPublicUrl(`${base}.jpg`);
         uploadedUrls.push(urlData.publicUrl);
+
+        const { error: thumbUploadError } = await supabase.storage.from("outfit-images").upload(`${base}-thumb.jpg`, f.thumbBlob);
+        if (!thumbUploadError) {
+          const { data: thumbUrlData } = supabase.storage.from("outfit-images").getPublicUrl(`${base}-thumb.jpg`);
+          uploadedThumbs.push(thumbUrlData.publicUrl);
+        } else {
+          uploadedThumbs.push(urlData.publicUrl);
+        }
       }
       const finalImages = [...existingImages, ...uploadedUrls].slice(0, MAX_PHOTOS);
+      const finalThumbs = [...(editingOutfit ? (editingOutfit.thumbs || existingImages) : []), ...uploadedThumbs].slice(0, MAX_PHOTOS);
       const myProfile = currentProfile();
 
       if (editingOutfit) {
@@ -792,6 +823,7 @@ export default function App() {
             links,
             styles: postStyles,
             images: finalImages,
+            thumbs: finalThumbs,
             image_url: finalImages[0] || editingOutfit.image_url,
           })
           .eq("id", editingOutfit.id);
@@ -802,6 +834,7 @@ export default function App() {
           price: price.trim(),
           image_url: finalImages[0],
           images: finalImages,
+          thumbs: finalThumbs,
           links,
           styles: postStyles,
           author: myProfile.username || session.user.email.split("@")[0],
@@ -991,7 +1024,7 @@ export default function App() {
   }
 
   function coverImage(item) {
-    return (item.images && item.images[0]) || item.image_url;
+    return (item.thumbs && item.thumbs[0]) || (item.images && item.images[0]) || item.image_url;
   }
 
   function galleryImages(item) {
@@ -1381,7 +1414,7 @@ export default function App() {
             <div className="masonry">
               {ownUploads.map((item) => (
                 <div className="card" key={item.id} onClick={() => setShowDetail(item)}>
-                  <img src={coverImage(item)} alt={item.title || "Outfit"} />
+                  <img src={coverImage(item)} alt={item.title || "Outfit"} loading="lazy" />
                   <div className="price-tag">€{item.price}</div>
                   <div className="like-badge"><Heart size={10} /> {item.like_count || 0}</div>
                   {item.images && item.images.length > 1 && (
@@ -1478,7 +1511,7 @@ export default function App() {
               <div className="masonry">
                 {sortedFiltered.map((item) => (
                   <div className="card" key={item.id} onClick={() => setShowDetail(item)}>
-                    <img src={coverImage(item)} alt={item.title || "Outfit"} />
+                    <img src={coverImage(item)} alt={item.title || "Outfit"} loading="lazy" />
                     <div className="price-tag">€{item.price}</div>
                     <div className="like-badge"><Heart size={10} /> {item.like_count || 0}</div>
                     {item.images && item.images.length > 1 && (
@@ -1525,7 +1558,7 @@ export default function App() {
             <div style={{ position: "relative" }}>
               <div className="gallery">
                 {galleryImages(showDetail).map((src, i) => (
-                  <img key={i} src={src} alt={showDetail.title || "Outfit"} />
+                  <img key={i} src={src} alt={showDetail.title || "Outfit"} loading="lazy" />
                 ))}
               </div>
               {galleryImages(showDetail).length > 1 && (
@@ -1598,7 +1631,20 @@ export default function App() {
 
               <div className="field-label" style={{ marginTop: 16 }}>Shop this look</div>
               {(showDetail.links || []).map((l, i) => (
-                <a key={i} className="buy-link-btn" href={l.url} target="_blank" rel="noopener noreferrer">
+                <a
+                  key={i}
+                  className="buy-link-btn"
+                  href={l.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={() => {
+                    supabase.from("link_clicks").insert({
+                      outfit_id: showDetail.id,
+                      link_type: l.type,
+                      link_url: l.url,
+                    }).then(() => {});
+                  }}
+                >
                   <span style={{ fontWeight: 700, fontSize: 14 }}>{l.type}</span>
                   <span style={{ color: t.accent, fontWeight: 700, fontSize: 13 }}>Shop →</span>
                 </a>
@@ -1732,7 +1778,7 @@ export default function App() {
                   key={item.id}
                   onClick={() => { setViewingProfileId(null); setShowDetail(item); }}
                 >
-                  <img src={coverImage(item)} alt={item.title || "Outfit"} />
+                  <img src={coverImage(item)} alt={item.title || "Outfit"} loading="lazy" />
                   <div className="price-tag">€{item.price}</div>
                   <div className="like-badge"><Heart size={10} /> {item.like_count || 0}</div>
                 </div>
