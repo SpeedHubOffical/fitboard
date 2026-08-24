@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import {
   Plus, X, Link as LinkIcon, Search, Trash2, ShoppingBag,
   Home, Heart, Bookmark, User, Settings, Sun, Moon, ChevronLeft, Camera, LogOut, Ban, SlidersHorizontal,
-  Share2, MessageCircle, Send, Flag, Bell, Info, FileText, Shield
+  Share2, MessageCircle, Send, Flag, Bell, Info, FileText, Shield, Pencil, Images
 } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
@@ -22,6 +22,43 @@ function isUnsafeLink(url) {
   }
 }
 
+// Resizes + compresses an image client-side before it ever gets uploaded,
+// so the feed stays fast as more people post.
+function compressImage(file, maxDim = 1280, quality = 0.75) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("read failed"));
+    reader.onload = (e) => {
+      const img = new window.Image();
+      img.onerror = () => reject(new Error("image load failed"));
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > maxDim || height > maxDim) {
+          if (width >= height) {
+            height = Math.round(height * (maxDim / width));
+            width = maxDim;
+          } else {
+            width = Math.round(width * (maxDim / height));
+            height = maxDim;
+          }
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, width, height);
+        canvas.toBlob(
+          (blob) => (blob ? resolve(blob) : reject(new Error("compression failed"))),
+          "image/jpeg",
+          quality
+        );
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 const ITEM_TYPES = ["Top", "Jumper", "Shirt", "Jacket", "Trousers", "Jeans", "Shoes", "Bag", "Accessory"];
 const PREFS_KEY = "fitboard-prefs";
 const ADMIN_EMAILS = ["kakhifn@gmail.com"];
@@ -32,6 +69,8 @@ const STYLE_OPTIONS = [
   "Denim", "Monochrome", "Glam", "Western", "Military", "Coastal", "Indie", "Softgirl", "Baddie",
   "VSCO", "E-girl", "E-boy", "Chic", "Layered",
 ];
+const PAGE_SIZE = 12;
+const MAX_PHOTOS = 5;
 
 const THEMES = {
   dark: {
@@ -72,12 +111,22 @@ export default function App() {
   const [authBusy, setAuthBusy] = useState(false);
   const [authMessage, setAuthMessage] = useState("");
 
-  const [items, setItems] = useState([]);
+  const [items, setItems] = useState([]); // feed tab (paginated or search results)
+  const [ownUploads, setOwnUploads] = useState([]);
+  const [viewingProfilePosts, setViewingProfilePosts] = useState([]);
+  const [likedItems, setLikedItems] = useState([]);
+  const [savedItems, setSavedItems] = useState([]);
   const [profiles, setProfiles] = useState({});
   const [follows, setFollows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
+  const [feedPage, setFeedPage] = useState(0);
+  const [hasMoreFeed, setHasMoreFeed] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const sentinelRef = useRef(null);
+
   const [showModal, setShowModal] = useState(false);
+  const [editingOutfit, setEditingOutfit] = useState(null);
   const [showDetail, setShowDetail] = useState(null);
   const [viewingProfileId, setViewingProfileId] = useState(null);
   const [query, setQuery] = useState("");
@@ -123,8 +172,8 @@ export default function App() {
   const [searchLogList, setSearchLogList] = useState([]);
   const searchLogTimer = useRef(null);
 
-  const [imgFile, setImgFile] = useState(null);
-  const [imgPreview, setImgPreview] = useState(null);
+  const [imgFiles, setImgFiles] = useState([]); // newly picked photos: [{ blob, preview }]
+  const [existingImages, setExistingImages] = useState([]); // photo URLs kept when editing
   const [title, setTitle] = useState("");
   const [price, setPrice] = useState("");
   const [links, setLinks] = useState([]);
@@ -133,7 +182,7 @@ export default function App() {
   const [postStyles, setPostStyles] = useState([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-  const fileInputId = useRef(`file-${Math.random().toString(36).slice(2)}`);
+  const photoInputId = useRef(`file-${Math.random().toString(36).slice(2)}`);
   const avatarInputId = useRef(`avatar-${Math.random().toString(36).slice(2)}`);
 
   const [editUsername, setEditUsername] = useState("");
@@ -142,6 +191,7 @@ export default function App() {
 
   const t = THEMES[themeName];
   const isAdmin = session && ADMIN_EMAILS.includes((session.user.email || "").toLowerCase());
+  const searchMode = Boolean(query.trim() || appliedFilters.min || appliedFilters.max || appliedFilters.styles.length > 0);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
@@ -161,16 +211,15 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (pendingOutfitId && items.length > 0) {
-      const match = items.find((i) => String(i.id) === String(pendingOutfitId));
-      if (match) setShowDetail(match);
+    if (pendingOutfitId) {
+      openOutfitById(pendingOutfitId);
       setPendingOutfitId(null);
     }
-  }, [pendingOutfitId, items]);
+  }, [pendingOutfitId]);
 
   useEffect(() => {
     if (session) {
-      loadItems();
+      loadFeedFirstPage();
       loadProfiles();
       loadFollows();
       loadNotifications();
@@ -180,25 +229,154 @@ export default function App() {
     }
   }, [session]);
 
+  // Re-run the feed query whenever search/filters change, but only for the feed tab
+  useEffect(() => {
+    if (!session || tab !== "feed") return;
+    if (searchMode) {
+      loadSearchResults();
+    } else {
+      loadFeedFirstPage();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query, appliedFilters, tab, session]);
+
+  // Infinite scroll: load more feed pages when the sentinel comes into view
+  useEffect(() => {
+    if (tab !== "feed" || searchMode) return;
+    const node = sentinelRef.current;
+    if (!node) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting && hasMoreFeed && !loadingMore) loadMoreFeed();
+      },
+      { rootMargin: "400px" }
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, searchMode, hasMoreFeed, loadingMore, feedPage]);
+
+  useEffect(() => {
+    if (showDetail) loadComments(showDetail.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showDetail && showDetail.id]);
+
+  useEffect(() => {
+    if (viewingProfileId) {
+      fetchUserOutfits(viewingProfileId).then(setViewingProfilePosts);
+    }
+  }, [viewingProfileId]);
+
+  useEffect(() => {
+    if (!session) return;
+    if (searchLogTimer.current) clearTimeout(searchLogTimer.current);
+    const q = query.trim();
+    if (q.length < 3) return;
+    searchLogTimer.current = setTimeout(async () => {
+      await supabase.from("search_log").insert({ query: q.toLowerCase() });
+      setSearchLogList((prev) => [q.toLowerCase(), ...prev].slice(0, 25));
+    }, 1200);
+    return () => clearTimeout(searchLogTimer.current);
+  }, [query, session]);
+
   function persist(next) {
     const merged = { theme: next.theme !== undefined ? next.theme : themeName };
     savePrefs(merged);
   }
 
-  async function loadItems() {
+  async function loadFeedFirstPage() {
     setLoading(true);
     setLoadError("");
     const { data, error: fetchError } = await supabase
       .from("outfits")
       .select("*")
-      .order("created_at", { ascending: false });
+      .order("created_at", { ascending: false })
+      .range(0, PAGE_SIZE - 1);
     if (fetchError) {
       setLoadError("Couldn't load the feed.");
+      setItems([]);
+      setHasMoreFeed(false);
+    } else {
+      setItems(data || []);
+      setHasMoreFeed((data || []).length === PAGE_SIZE);
+      setFeedPage(1);
+    }
+    setLoading(false);
+  }
+
+  async function loadMoreFeed() {
+    setLoadingMore(true);
+    const from = feedPage * PAGE_SIZE;
+    const { data, error: fetchError } = await supabase
+      .from("outfits")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .range(from, from + PAGE_SIZE - 1);
+    if (!fetchError) {
+      setItems((prev) => [...prev, ...(data || [])]);
+      setHasMoreFeed((data || []).length === PAGE_SIZE);
+      setFeedPage((p) => p + 1);
+    }
+    setLoadingMore(false);
+  }
+
+  async function loadSearchResults() {
+    setLoading(true);
+    setLoadError("");
+    const { data, error: fetchError } = await supabase
+      .from("outfits")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .limit(300);
+    if (fetchError) {
+      setLoadError("Couldn't load results.");
       setItems([]);
     } else {
       setItems(data || []);
     }
+    setHasMoreFeed(false);
     setLoading(false);
+  }
+
+  async function fetchUserOutfits(userId) {
+    const { data } = await supabase
+      .from("outfits")
+      .select("*")
+      .eq("user_id", userId)
+      .order("created_at", { ascending: false });
+    return data || [];
+  }
+
+  async function loadLikedItems() {
+    if (liked.length === 0) return setLikedItems([]);
+    const { data } = await supabase.from("outfits").select("*").in("id", liked).order("created_at", { ascending: false });
+    setLikedItems(data || []);
+  }
+
+  async function loadSavedItems() {
+    if (saved.length === 0) return setSavedItems([]);
+    const { data } = await supabase.from("outfits").select("*").in("id", saved).order("created_at", { ascending: false });
+    setSavedItems(data || []);
+  }
+
+  async function openOutfitById(id) {
+    const { data } = await supabase.from("outfits").select("*").eq("id", id).single();
+    if (data) setShowDetail(data);
+  }
+
+  async function refreshCurrentLists() {
+    if (tab === "feed") {
+      if (searchMode) loadSearchResults();
+      else loadFeedFirstPage();
+    }
+    if (tab === "profile" && session) {
+      fetchUserOutfits(session.user.id).then(setOwnUploads);
+    }
+    if (tab === "liked") loadLikedItems();
+    if (tab === "saved") loadSavedItems();
+    if (viewingProfileId) {
+      fetchUserOutfits(viewingProfileId).then(setViewingProfilePosts);
+    }
   }
 
   async function loadProfiles() {
@@ -246,6 +424,7 @@ export default function App() {
       const p = profiles[session.user.id];
       if (!p || !p.onboarded) setShowOnboarding(true);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session, profilesLoaded]);
 
   async function handleGoogleLogin() {
@@ -298,16 +477,23 @@ export default function App() {
     persist({ theme: next });
   }
 
+  function bumpLikeCountEverywhere(id, newCount) {
+    const patch = (arr) => arr.map((i) => (i.id === id ? { ...i, like_count: newCount } : i));
+    setItems((prev) => patch(prev));
+    setOwnUploads((prev) => patch(prev));
+    setViewingProfilePosts((prev) => patch(prev));
+    setLikedItems((prev) => patch(prev));
+    setSavedItems((prev) => patch(prev));
+    if (showDetail && showDetail.id === id) setShowDetail((d) => ({ ...d, like_count: newCount }));
+  }
+
   async function toggleLiked(item) {
     const alreadyLiked = liked.includes(item.id);
     const next = alreadyLiked ? liked.filter((x) => x !== item.id) : [...liked, item.id];
     setLiked(next);
 
     const newCount = Math.max(0, (item.like_count || 0) + (alreadyLiked ? -1 : 1));
-    setItems((prev) => prev.map((i) => (i.id === item.id ? { ...i, like_count: newCount } : i)));
-    if (showDetail && showDetail.id === item.id) {
-      setShowDetail({ ...showDetail, like_count: newCount });
-    }
+    bumpLikeCountEverywhere(item.id, newCount);
 
     const { error: writeError } = alreadyLiked
       ? await supabase.from("likes").delete().eq("outfit_id", item.id)
@@ -315,10 +501,9 @@ export default function App() {
 
     if (writeError) {
       setLiked(liked);
-      setItems((prev) => prev.map((i) => (i.id === item.id ? { ...i, like_count: item.like_count || 0 } : i)));
-      if (showDetail && showDetail.id === item.id) {
-        setShowDetail({ ...showDetail, like_count: item.like_count || 0 });
-      }
+      bumpLikeCountEverywhere(item.id, item.like_count || 0);
+    } else if (tab === "liked") {
+      loadLikedItems();
     }
   }
 
@@ -330,93 +515,7 @@ export default function App() {
       ? await supabase.from("saves").delete().eq("outfit_id", id)
       : await supabase.from("saves").insert({ outfit_id: id });
     if (writeError) setSaved(saved);
-  }
-
-  function handleFile(e) {
-    const file = e.target.files && e.target.files[0];
-    if (!file) return;
-    if (!file.type.startsWith("image/")) return setError("That file isn't an image.");
-    if (file.size > 5 * 1024 * 1024) return setError("Image too large — pick something under 5MB.");
-    setError("");
-    setImgFile(file);
-    const reader = new FileReader();
-    reader.onload = (ev) => setImgPreview(ev.target.result);
-    reader.readAsDataURL(file);
-  }
-
-  function handleAvatarFile(e) {
-    const file = e.target.files && e.target.files[0];
-    if (!file) return;
-    if (!file.type.startsWith("image/")) return;
-    if (file.size > 3 * 1024 * 1024) return;
-    const reader = new FileReader();
-    reader.onload = (ev) => setEditAvatar(ev.target.result);
-    reader.readAsDataURL(file);
-  }
-
-  function addLink() {
-    if (!linkUrl.trim()) return setError("Paste a link first.");
-    const url = linkUrl.trim().startsWith("http") ? linkUrl.trim() : `https://${linkUrl.trim()}`;
-    if (isUnsafeLink(url)) return setError("That link isn't allowed on FitBoard.");
-    setLinks([...links, { type: linkType, url }]);
-    setLinkUrl("");
-    setError("");
-  }
-
-  function removeLink(idx) {
-    setLinks(links.filter((_, i) => i !== idx));
-  }
-
-  function togglePostStyle(s) {
-    setPostStyles((prev) => (prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]));
-  }
-
-  function resetForm() {
-    setImgFile(null);
-    setImgPreview(null);
-    setTitle("");
-    setPrice("");
-    setLinks([]);
-    setLinkUrl("");
-    setPostStyles([]);
-    setError("");
-  }
-
-  useEffect(() => {
-    if (showDetail) loadComments(showDetail.id);
-  }, [showDetail && showDetail.id]);
-
-  async function loadComments(outfitId) {
-    const { data } = await supabase
-      .from("comments")
-      .select("*")
-      .eq("outfit_id", outfitId)
-      .order("created_at", { ascending: true });
-    setComments((prev) => ({ ...prev, [outfitId]: data || [] }));
-  }
-
-  async function addComment(outfitId) {
-    if (!commentText.trim()) return;
-    setCommentSubmitting(true);
-    const myProfile = currentProfile();
-    const { error: insertError } = await supabase.from("comments").insert({
-      outfit_id: outfitId,
-      user_id: session.user.id,
-      author: myProfile.username || session.user.email.split("@")[0],
-      text: commentText.trim(),
-    });
-    if (!insertError) {
-      setCommentText("");
-      loadComments(outfitId);
-    } else if (insertError.message && insertError.message.includes("rate_limited")) {
-      setError("You're commenting too fast — slow down a bit.");
-    }
-    setCommentSubmitting(false);
-  }
-
-  async function deleteComment(commentId, outfitId) {
-    await supabase.from("comments").delete().eq("id", commentId);
-    loadComments(outfitId);
+    else if (tab === "saved") loadSavedItems();
   }
 
   async function loadLikes() {
@@ -459,8 +558,7 @@ export default function App() {
   function goToNotification(n) {
     setShowNotifications(false);
     if (n.type === "comment" && n.outfit_id) {
-      const outfit = items.find((i) => i.id === n.outfit_id);
-      if (outfit) setShowDetail(outfit);
+      openOutfitById(n.outfit_id);
     } else if (n.actor_id) {
       setViewingProfileId(n.actor_id);
     }
@@ -488,6 +586,7 @@ export default function App() {
       outfit_id: reportTarget.outfitId,
       reported_user_id: reportTarget.userId,
       reason: reportReason.trim(),
+      outfit_title: reportTarget.outfitId ? reportTarget.label : null,
     });
     setReportSubmitting(false);
     if (!reportError) {
@@ -519,7 +618,7 @@ export default function App() {
       try {
         await navigator.share(shareData);
       } catch (e) {
-        // user cancelled share sheet, do nothing
+        // user cancelled share sheet
       }
     } else {
       try {
@@ -527,29 +626,145 @@ export default function App() {
         setShareCopied(true);
         setTimeout(() => setShareCopied(false), 2000);
       } catch (e) {
-        // clipboard blocked, silently ignore
+        // clipboard blocked
       }
     }
   }
 
-  useEffect(() => {
-    if (!session) return;
-    if (searchLogTimer.current) clearTimeout(searchLogTimer.current);
-    const q = query.trim();
-    if (q.length < 3) return;
-    searchLogTimer.current = setTimeout(async () => {
-      await supabase.from("search_log").insert({ query: q.toLowerCase() });
-      setSearchLogList((prev) => [q.toLowerCase(), ...prev].slice(0, 25));
-    }, 1200);
-    return () => clearTimeout(searchLogTimer.current);
-  }, [query, session]);
+  async function loadComments(outfitId) {
+    const { data } = await supabase
+      .from("comments")
+      .select("*")
+      .eq("outfit_id", outfitId)
+      .order("created_at", { ascending: true });
+    setComments((prev) => ({ ...prev, [outfitId]: data || [] }));
+  }
+
+  async function addComment(outfitId) {
+    if (!commentText.trim()) return;
+    setCommentSubmitting(true);
+    const myProfile = currentProfile();
+    const { error: insertError } = await supabase.from("comments").insert({
+      outfit_id: outfitId,
+      user_id: session.user.id,
+      author: myProfile.username || session.user.email.split("@")[0],
+      text: commentText.trim(),
+    });
+    if (!insertError) {
+      setCommentText("");
+      loadComments(outfitId);
+    } else if (insertError.message && insertError.message.includes("rate_limited")) {
+      setError("You're commenting too fast — slow down a bit.");
+    }
+    setCommentSubmitting(false);
+  }
+
+  async function deleteComment(commentId, outfitId) {
+    await supabase.from("comments").delete().eq("id", commentId);
+    loadComments(outfitId);
+  }
 
   function currentProfile() {
     return (session && profiles[session.user.id]) || { username: "", bio: "", avatar_url: null };
   }
 
-  async function handleUpload() {
-    if (!imgFile) return setError("Add a photo first.");
+  async function handlePhotoFiles(e) {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+    setError("");
+    const roomLeft = MAX_PHOTOS - (existingImages.length + imgFiles.length);
+    const toProcess = files.slice(0, Math.max(0, roomLeft));
+    if (toProcess.length === 0) {
+      setError(`You can add up to ${MAX_PHOTOS} photos.`);
+      return;
+    }
+    for (const file of toProcess) {
+      if (!file.type.startsWith("image/")) continue;
+      if (file.size > 15 * 1024 * 1024) { setError("One of those images was too large."); continue; }
+      try {
+        const blob = await compressImage(file);
+        const preview = URL.createObjectURL(blob);
+        setImgFiles((prev) => [...prev, { blob, preview }]);
+      } catch {
+        setError("Couldn't process one of those photos — try another.");
+      }
+    }
+    e.target.value = "";
+  }
+
+  function removeNewPhoto(idx) {
+    setImgFiles((prev) => {
+      const next = [...prev];
+      URL.revokeObjectURL(next[idx].preview);
+      next.splice(idx, 1);
+      return next;
+    });
+  }
+
+  function removeExistingPhoto(idx) {
+    setExistingImages((prev) => prev.filter((_, i) => i !== idx));
+  }
+
+  function handleAvatarFile(e) {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    if (!file.type.startsWith("image/")) return;
+    if (file.size > 12 * 1024 * 1024) return;
+    compressImage(file, 500, 0.8)
+      .then((blob) => {
+        const reader = new FileReader();
+        reader.onload = (ev) => setEditAvatar(ev.target.result);
+        reader.readAsDataURL(blob);
+      })
+      .catch(() => {});
+  }
+
+  function addLink() {
+    if (!linkUrl.trim()) return setError("Paste a link first.");
+    const url = linkUrl.trim().startsWith("http") ? linkUrl.trim() : `https://${linkUrl.trim()}`;
+    if (isUnsafeLink(url)) return setError("That link isn't allowed on FitBoard.");
+    setLinks([...links, { type: linkType, url }]);
+    setLinkUrl("");
+    setError("");
+  }
+
+  function removeLink(idx) {
+    setLinks(links.filter((_, i) => i !== idx));
+  }
+
+  function togglePostStyle(s) {
+    setPostStyles((prev) => (prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]));
+  }
+
+  function resetForm() {
+    imgFiles.forEach((f) => URL.revokeObjectURL(f.preview));
+    setImgFiles([]);
+    setExistingImages([]);
+    setEditingOutfit(null);
+    setTitle("");
+    setPrice("");
+    setLinks([]);
+    setLinkUrl("");
+    setPostStyles([]);
+    setError("");
+  }
+
+  function openEditOutfit(item) {
+    setEditingOutfit(item);
+    setTitle(item.title || "");
+    setPrice(String(item.price || ""));
+    setLinks(item.links || []);
+    setPostStyles(item.styles || []);
+    setExistingImages(item.images && item.images.length ? item.images : (item.image_url ? [item.image_url] : []));
+    setImgFiles([]);
+    setError("");
+    setShowDetail(null);
+    setShowModal(true);
+  }
+
+  async function handleSubmitOutfit() {
+    const totalPhotos = existingImages.length + imgFiles.length;
+    if (totalPhotos === 0) return setError("Add at least one photo.");
     if (!title.trim()) return setError("Add a title.");
     if (!price.trim()) return setError("Add a price.");
     if (links.length === 0) return setError("Add at least one item link.");
@@ -557,35 +772,48 @@ export default function App() {
     setSaving(true);
     setError("");
     try {
-      const fileExt = imgFile.name.split(".").pop();
-      const fileName = `${Date.now()}-${Math.random().toString(36).slice(2)}.${fileExt}`;
-
-      const { error: uploadError } = await supabase.storage
-        .from("outfit-images")
-        .upload(fileName, imgFile);
-      if (uploadError) throw uploadError;
-
-      const { data: urlData } = supabase.storage
-        .from("outfit-images")
-        .getPublicUrl(fileName);
-
+      const uploadedUrls = [];
+      for (const f of imgFiles) {
+        const fileName = `${Date.now()}-${Math.random().toString(36).slice(2)}.jpg`;
+        const { error: uploadError } = await supabase.storage.from("outfit-images").upload(fileName, f.blob);
+        if (uploadError) throw uploadError;
+        const { data: urlData } = supabase.storage.from("outfit-images").getPublicUrl(fileName);
+        uploadedUrls.push(urlData.publicUrl);
+      }
+      const finalImages = [...existingImages, ...uploadedUrls].slice(0, MAX_PHOTOS);
       const myProfile = currentProfile();
 
-      const { error: insertError } = await supabase.from("outfits").insert({
-        title: title.trim(),
-        price: price.trim(),
-        image_url: urlData.publicUrl,
-        links,
-        styles: postStyles,
-        author: myProfile.username || session.user.email.split("@")[0],
-        user_id: session.user.id,
-        like_count: 0,
-      });
-      if (insertError) throw insertError;
+      if (editingOutfit) {
+        const { error: updateError } = await supabase
+          .from("outfits")
+          .update({
+            title: title.trim(),
+            price: price.trim(),
+            links,
+            styles: postStyles,
+            images: finalImages,
+            image_url: finalImages[0] || editingOutfit.image_url,
+          })
+          .eq("id", editingOutfit.id);
+        if (updateError) throw updateError;
+      } else {
+        const { error: insertError } = await supabase.from("outfits").insert({
+          title: title.trim(),
+          price: price.trim(),
+          image_url: finalImages[0],
+          images: finalImages,
+          links,
+          styles: postStyles,
+          author: myProfile.username || session.user.email.split("@")[0],
+          user_id: session.user.id,
+          like_count: 0,
+        });
+        if (insertError) throw insertError;
+      }
 
       resetForm();
       setShowModal(false);
-      loadItems();
+      refreshCurrentLists();
     } catch (e) {
       const msg = e.message || "";
       if (msg.includes("rate_limited")) {
@@ -593,7 +821,7 @@ export default function App() {
       } else if (msg.includes("row-level security")) {
         setError("You've been restricted from posting.");
       } else {
-        setError("Upload failed — try again.");
+        setError("Something went wrong — try again.");
       }
     }
     setSaving(false);
@@ -607,7 +835,7 @@ export default function App() {
       return;
     }
     setShowDetail(null);
-    loadItems();
+    refreshCurrentLists();
   }
 
   async function handleBanUser(userId) {
@@ -705,10 +933,7 @@ export default function App() {
   const activeFilterCount =
     (appliedFilters.min ? 1 : 0) + (appliedFilters.max ? 1 : 0) + (appliedFilters.styles.length > 0 ? 1 : 0);
 
-  const baseList =
-    tab === "liked" ? items.filter((i) => liked.includes(i.id)) :
-    tab === "saved" ? items.filter((i) => saved.includes(i.id)) :
-    items;
+  const baseList = tab === "liked" ? likedItems : tab === "saved" ? savedItems : items;
 
   const filtered = baseList.filter((item) => {
     if (query.trim()) {
@@ -734,9 +959,9 @@ export default function App() {
   });
 
   const explicitStyles = currentProfile().styles || [];
-  const likedSavedOutfits = items.filter((i) => liked.includes(i.id) || saved.includes(i.id));
+  const likedSavedForRec = [...likedItems, ...savedItems];
   const implicitStyleCounts = {};
-  likedSavedOutfits.forEach((i) => {
+  likedSavedForRec.forEach((i) => {
     (i.styles || []).forEach((s) => { implicitStyleCounts[s] = (implicitStyleCounts[s] || 0) + 1; });
   });
   const implicitStyles = Object.keys(implicitStyleCounts);
@@ -754,7 +979,7 @@ export default function App() {
   }
 
   const sortedFiltered =
-    tab === "feed" && (explicitStyles.length > 0 || implicitStyles.length > 0 || searchTerms.length > 0)
+    tab === "feed" && !searchMode && (explicitStyles.length > 0 || implicitStyles.length > 0 || searchTerms.length > 0)
       ? [...filtered].sort((a, b) => recScore(b) - recScore(a))
       : filtered;
 
@@ -763,6 +988,14 @@ export default function App() {
   function authorLabel(item) {
     const p = profiles[item.user_id];
     return (p && p.username) || item.author || "Anonymous";
+  }
+
+  function coverImage(item) {
+    return (item.images && item.images[0]) || item.image_url;
+  }
+
+  function galleryImages(item) {
+    return item.images && item.images.length ? item.images : (item.image_url ? [item.image_url] : []);
   }
 
   if (!authChecked) {
@@ -884,7 +1117,6 @@ export default function App() {
   }
 
   const viewingProfile = viewingProfileId ? (profiles[viewingProfileId] || {}) : null;
-  const viewingProfilePosts = viewingProfileId ? items.filter((i) => i.user_id === viewingProfileId) : [];
 
   return (
     <div style={{ ...styles.page, background: t.bg, color: t.text }}>
@@ -910,6 +1142,11 @@ export default function App() {
           color: #fff; font-weight: 700; font-size: 11px; padding: 4px 8px; border-radius: 20px;
           display: flex; align-items: center; gap: 3px;
         }
+        .photo-count-badge {
+          position: absolute; bottom: 40px; right: 8px; background: rgba(20,20,20,0.75); backdrop-filter: blur(4px);
+          color: #fff; font-weight: 700; font-size: 10.5px; padding: 3px 7px; border-radius: 20px;
+          display: flex; align-items: center; gap: 3px;
+        }
         .card-footer { padding: 8px 10px 10px; }
         .card-title {
           font-size: 12px; font-weight: 700; color: ${t.text};
@@ -924,7 +1161,7 @@ export default function App() {
           background: ${t.accent}; display: flex; align-items: center; justify-content: center;
           box-shadow: 0 8px 24px rgba(232,68,44,0.4); border: none; cursor: pointer; z-index: 30;
         }
-        .fab:active { transform: scale(0.94); }
+        .fab:active { transform: scale(0.88); }
         .modal-backdrop, .detail-backdrop {
           position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: flex; align-items: flex-end; z-index: 40;
         }
@@ -937,14 +1174,25 @@ export default function App() {
           background: ${t.sheetBg}; border-radius: 20px; max-width: 420px; width: 100%;
           max-height: 88vh; overflow-y: auto; border: 1px solid ${t.border};
         }
-        .detail-img { width: 100%; display: block; }
+        .gallery { display: flex; overflow-x: auto; scroll-snap-type: x mandatory; }
+        .gallery img { flex: 0 0 100%; width: 100%; display: block; scroll-snap-align: start; }
+        .gallery-badge {
+          position: absolute; top: 12px; right: 12px; background: rgba(20,20,20,0.75); color: #fff;
+          font-weight: 700; font-size: 11px; padding: 4px 10px; border-radius: 20px;
+        }
         .detail-body { padding: 16px; }
         .drop-label {
-          border: 1.5px dashed ${t.border}; border-radius: 16px; height: 220px; display: flex;
-          flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: ${t.textFaint};
+          border: 1.5px dashed ${t.border}; border-radius: 16px; height: 130px; width: 100%; display: flex;
+          flex-direction: column; align-items: center; justify-content: center; gap: 6px; color: ${t.textFaint};
           cursor: pointer; overflow: hidden; position: relative;
         }
-        .drop-label img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+        .photo-strip { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+        .photo-thumb { position: relative; width: 76px; height: 76px; border-radius: 12px; overflow: hidden; border: 1px solid ${t.border}; }
+        .photo-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+        .photo-thumb-remove {
+          position: absolute; top: 3px; right: 3px; background: rgba(0,0,0,0.65); border: none; color: #fff;
+          border-radius: 50%; width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; cursor: pointer;
+        }
         .field-label {
           font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
           color: ${t.textMuted}; margin: 18px 0 8px; display: flex; align-items: center; gap: 6px;
@@ -1030,7 +1278,7 @@ export default function App() {
         }
         .toggle-thumb {
           width: 20px; height: 20px; border-radius: 50%; background: #fff; position: absolute; top: 3px;
-          left: ${themeName === "dark" ? "23px" : "3px"}; transition: left 0.2s; box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+          left: ${themeName === "dark" ? "23px" : "3px"}; transition: left 0.25s cubic-bezier(0.34, 1.56, 0.64, 1); box-shadow: 0 1px 3px rgba(0,0,0,0.3);
         }
         .profile-header { display: flex; flex-direction: column; align-items: center; padding: 24px 20px 10px; text-align: center; }
         .avatar-lg {
@@ -1055,24 +1303,6 @@ export default function App() {
         }
         .hidden-file-input { position: absolute; width: 1px; height: 1px; opacity: 0; overflow: hidden; }
         .author-link { cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
-        * { transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease; }
-        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
-        @keyframes slideUp { from { transform: translateY(24px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
-        @keyframes popIn { from { transform: scale(0.9); opacity: 0; } to { transform: scale(1); opacity: 1; } }
-        @keyframes heartPop { 0% { transform: scale(1); } 40% { transform: scale(1.35); } 100% { transform: scale(1); } }
-        .card { animation: popIn 0.25s ease both; }
-        .modal-backdrop, .detail-backdrop { animation: fadeIn 0.2s ease both; }
-        .modal-sheet { animation: slideUp 0.28s cubic-bezier(0.22, 1, 0.36, 1) both; }
-        .detail-card { animation: popIn 0.25s cubic-bezier(0.22, 1, 0.36, 1) both; }
-        .card, .fab, .icon-btn, .nav-btn, .action-btn, .style-chip, .filter-btn, .ob-style-chip, .ob-gender-btn {
-          transition: transform 0.15s ease, background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
-        }
-        .fab { transition: transform 0.15s cubic-bezier(0.34, 1.56, 0.64, 1); }
-        .fab:active { transform: scale(0.88); }
-        .heart-pop { animation: heartPop 0.35s ease; }
-        .nav-btn { transition: color 0.2s ease, transform 0.15s ease; }
-        .nav-btn:active { transform: scale(0.92); }
-        .toggle-thumb { transition: left 0.25s cubic-bezier(0.34, 1.56, 0.64, 1); }
         .style-chip-grid { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; max-height: 32vh; overflow-y: auto; padding-bottom: 4px; }
         .style-chip {
           padding: 9px 14px; border-radius: 20px; border: 1px solid ${t.border};
@@ -1089,6 +1319,22 @@ export default function App() {
           flex: 1.4; background: ${t.accent}; border: none; color: #fff;
           font-weight: 700; font-size: 14px; border-radius: 14px; padding: 14px; cursor: pointer;
         }
+        * { transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease; }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes slideUp { from { transform: translateY(24px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+        @keyframes popIn { from { transform: scale(0.9); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+        @keyframes heartPop { 0% { transform: scale(1); } 40% { transform: scale(1.35); } 100% { transform: scale(1); } }
+        .card { animation: popIn 0.25s ease both; }
+        .modal-backdrop, .detail-backdrop { animation: fadeIn 0.2s ease both; }
+        .modal-sheet { animation: slideUp 0.28s cubic-bezier(0.22, 1, 0.36, 1) both; }
+        .detail-card { animation: popIn 0.25s cubic-bezier(0.22, 1, 0.36, 1) both; }
+        .card, .fab, .icon-btn, .nav-btn, .action-btn, .style-chip, .filter-btn, .ob-style-chip, .ob-gender-btn {
+          transition: transform 0.15s ease, background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+        }
+        .fab { transition: transform 0.15s cubic-bezier(0.34, 1.56, 0.64, 1); }
+        .heart-pop { animation: heartPop 0.35s ease; }
+        .nav-btn { transition: color 0.2s ease, transform 0.15s ease; }
+        .nav-btn:active { transform: scale(0.92); }
       `}</style>
 
       {tab === "profile" ? (
@@ -1129,15 +1375,18 @@ export default function App() {
           <div style={{ padding: "16px 16px 0", fontSize: 12, fontWeight: 700, color: t.textMuted, textTransform: "uppercase", letterSpacing: "0.06em" }}>
             Your uploads
           </div>
-          {items.filter((i) => i.user_id === session.user.id).length === 0 ? (
+          {ownUploads.length === 0 ? (
             <div style={styles.empty}>Nothing posted yet.</div>
           ) : (
             <div className="masonry">
-              {items.filter((i) => i.user_id === session.user.id).map((item) => (
+              {ownUploads.map((item) => (
                 <div className="card" key={item.id} onClick={() => setShowDetail(item)}>
-                  <img src={item.image_url} alt={item.title || "Outfit"} />
+                  <img src={coverImage(item)} alt={item.title || "Outfit"} />
                   <div className="price-tag">€{item.price}</div>
                   <div className="like-badge"><Heart size={10} /> {item.like_count || 0}</div>
+                  {item.images && item.images.length > 1 && (
+                    <div className="photo-count-badge"><Images size={10} /> {item.images.length}</div>
+                  )}
                   <div className="card-footer">
                     {item.title && <div className="card-title">{item.title}</div>}
                   </div>
@@ -1218,52 +1467,71 @@ export default function App() {
             <div style={{ ...styles.empty, animation: "fadeIn 0.4s ease" }}>Loading looks…</div>
           ) : loadError ? (
             <div style={styles.empty}>{loadError}</div>
-          ) : filtered.length === 0 ? (
+          ) : sortedFiltered.length === 0 ? (
             <div style={styles.empty}>
               {tab === "liked" && "No liked outfits yet."}
               {tab === "saved" && "No saved outfits yet."}
               {tab === "feed" && (items.length === 0 ? <>No looks yet.<br />Tap + to post the first one.</> : "No outfits match your search or filters.")}
             </div>
           ) : (
-            <div className="masonry">
-              {sortedFiltered.map((item) => (
-                <div className="card" key={item.id} onClick={() => setShowDetail(item)}>
-                  <img src={item.image_url} alt={item.title || "Outfit"} />
-                  <div className="price-tag">€{item.price}</div>
-                  <div className="like-badge"><Heart size={10} /> {item.like_count || 0}</div>
-                  <div className="card-footer">
-                    {item.title && <div className="card-title">{item.title}</div>}
-                    <div
-                      className="card-author author-link"
-                      onClick={(e) => { e.stopPropagation(); setViewingProfileId(item.user_id); }}
-                    >
-                      by {authorLabel(item)}
+            <>
+              <div className="masonry">
+                {sortedFiltered.map((item) => (
+                  <div className="card" key={item.id} onClick={() => setShowDetail(item)}>
+                    <img src={coverImage(item)} alt={item.title || "Outfit"} />
+                    <div className="price-tag">€{item.price}</div>
+                    <div className="like-badge"><Heart size={10} /> {item.like_count || 0}</div>
+                    {item.images && item.images.length > 1 && (
+                      <div className="photo-count-badge"><Images size={10} /> {item.images.length}</div>
+                    )}
+                    <div className="card-footer">
+                      {item.title && <div className="card-title">{item.title}</div>}
+                      <div
+                        className="card-author author-link"
+                        onClick={(e) => { e.stopPropagation(); setViewingProfileId(item.user_id); }}
+                      >
+                        by {authorLabel(item)}
+                      </div>
                     </div>
                   </div>
+                ))}
+              </div>
+              {tab === "feed" && !searchMode && (
+                <div ref={sentinelRef} style={{ textAlign: "center", padding: "10px 0 20px", fontSize: 12, color: t.textFaint }}>
+                  {loadingMore ? "Loading more…" : !hasMoreFeed && items.length > 0 ? "You're all caught up" : ""}
                 </div>
-              ))}
-            </div>
+              )}
+            </>
           )}
         </>
       )}
 
       {tab === "feed" && (
-        <button className="fab" onClick={() => setShowModal(true)} aria-label="Add outfit">
+        <button className="fab" onClick={() => { resetForm(); setShowModal(true); }} aria-label="Add outfit">
           <Plus color="#fff" size={26} strokeWidth={2.5} />
         </button>
       )}
 
       <nav className="bottom-nav">
         <button className={`nav-btn ${tab === "feed" ? "active" : ""}`} onClick={() => setTab("feed")}><Home size={20} /> Feed</button>
-        <button className={`nav-btn ${tab === "liked" ? "active" : ""}`} onClick={() => setTab("liked")}><Heart size={20} /> Liked</button>
-        <button className={`nav-btn ${tab === "saved" ? "active" : ""}`} onClick={() => setTab("saved")}><Bookmark size={20} /> Saved</button>
-        <button className={`nav-btn ${tab === "profile" ? "active" : ""}`} onClick={() => setTab("profile")}><User size={20} /> Profile</button>
+        <button className={`nav-btn ${tab === "liked" ? "active" : ""}`} onClick={() => { setTab("liked"); loadLikedItems(); }}><Heart size={20} /> Liked</button>
+        <button className={`nav-btn ${tab === "saved" ? "active" : ""}`} onClick={() => { setTab("saved"); loadSavedItems(); }}><Bookmark size={20} /> Saved</button>
+        <button className={`nav-btn ${tab === "profile" ? "active" : ""}`} onClick={() => { setTab("profile"); fetchUserOutfits(session.user.id).then(setOwnUploads); }}><User size={20} /> Profile</button>
       </nav>
 
       {showDetail && (
         <div className="detail-backdrop" onClick={() => setShowDetail(null)}>
           <div className="detail-card" onClick={(e) => e.stopPropagation()}>
-            <img className="detail-img" src={showDetail.image_url} alt="Outfit" />
+            <div style={{ position: "relative" }}>
+              <div className="gallery">
+                {galleryImages(showDetail).map((src, i) => (
+                  <img key={i} src={src} alt={showDetail.title || "Outfit"} />
+                ))}
+              </div>
+              {galleryImages(showDetail).length > 1 && (
+                <div className="gallery-badge">{galleryImages(showDetail).length} photos — swipe →</div>
+              )}
+            </div>
             <div className="detail-body">
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
                 <div>
@@ -1312,9 +1580,14 @@ export default function App() {
               </div>
 
               {isMine(showDetail) && (
-                <button className="action-btn danger" style={{ width: "100%", marginTop: 10 }} onClick={() => handleDelete(showDetail)}>
-                  <Trash2 size={15} /> Delete this outfit
-                </button>
+                <div style={{ display: "flex", gap: 10, marginTop: 10 }}>
+                  <button className="action-btn" onClick={() => openEditOutfit(showDetail)}>
+                    <Pencil size={15} /> Edit
+                  </button>
+                  <button className="action-btn danger" onClick={() => handleDelete(showDetail)}>
+                    <Trash2 size={15} /> Delete
+                  </button>
+                </div>
               )}
 
               {isAdmin && showDetail.user_id !== session.user.id && (
@@ -1459,7 +1732,7 @@ export default function App() {
                   key={item.id}
                   onClick={() => { setViewingProfileId(null); setShowDetail(item); }}
                 >
-                  <img src={item.image_url} alt={item.title || "Outfit"} />
+                  <img src={coverImage(item)} alt={item.title || "Outfit"} />
                   <div className="price-tag">€{item.price}</div>
                   <div className="like-badge"><Heart size={10} /> {item.like_count || 0}</div>
                 </div>
@@ -1518,7 +1791,6 @@ export default function App() {
               notifications.map((n) => {
                 const actorP = profiles[n.actor_id];
                 const actorName = (actorP && actorP.username) || "Someone";
-                const outfitTitle = n.outfit_id ? (items.find((i) => i.id === n.outfit_id) || {}).title : null;
                 return (
                   <div
                     key={n.id}
@@ -1531,7 +1803,7 @@ export default function App() {
                     <div style={{ flex: 1 }}>
                       <div style={{ fontSize: 13.5 }}>
                         <span style={{ fontWeight: 700 }}>{actorName}</span>{" "}
-                        {n.type === "follow" ? "started following you" : `commented on ${outfitTitle ? `"${outfitTitle}"` : "your outfit"}`}
+                        {n.type === "follow" ? "started following you" : `commented on ${n.outfit_title ? `"${n.outfit_title}"` : "your outfit"}`}
                       </div>
                       <div style={{ fontSize: 11, color: t.textFaint, marginTop: 2 }}>{new Date(n.created_at).toLocaleString()}</div>
                     </div>
@@ -1633,7 +1905,6 @@ export default function App() {
               reports.map((r) => {
                 const reporterP = profiles[r.reporter_id];
                 const reportedP = profiles[r.reported_user_id];
-                const reportedOutfit = r.outfit_id ? items.find((i) => i.id === r.outfit_id) : null;
                 return (
                   <div key={r.id} style={{ background: t.cardAlt, border: `1px solid ${t.border}`, borderRadius: 14, padding: 14, marginTop: 12 }}>
                     <div style={{ fontSize: 11.5, color: t.textFaint }}>
@@ -1642,12 +1913,12 @@ export default function App() {
                     <div style={{ fontSize: 13, marginTop: 6 }}>
                       <span style={{ fontWeight: 700 }}>{(reporterP && reporterP.username) || "Someone"}</span> reported{" "}
                       <span style={{ fontWeight: 700 }}>{(reportedP && reportedP.username) || "a user"}</span>
-                      {reportedOutfit ? <> for the outfit "{reportedOutfit.title}"</> : null}
+                      {r.outfit_title ? <> for the outfit "{r.outfit_title}"</> : null}
                     </div>
                     <div style={{ fontSize: 13.5, marginTop: 8, color: t.text }}>{r.reason}</div>
                     <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-                      {reportedOutfit && (
-                        <button className="action-btn" style={{ fontSize: 12 }} onClick={() => { setShowReportsPanel(false); setShowDetail(reportedOutfit); }}>
+                      {r.outfit_id && (
+                        <button className="action-btn" style={{ fontSize: 12 }} onClick={() => { setShowReportsPanel(false); openOutfitById(r.outfit_id); }}>
                           View outfit
                         </button>
                       )}
@@ -1672,19 +1943,33 @@ export default function App() {
         <div className="modal-backdrop" onClick={() => setShowModal(false)}>
           <div className="modal-sheet" onClick={(e) => e.stopPropagation()}>
             <div className="sheet-header">
-              <h2 style={{ margin: 0, fontSize: 18, fontWeight: 800 }}>Post a fit</h2>
+              <h2 style={{ margin: 0, fontSize: 18, fontWeight: 800 }}>{editingOutfit ? "Edit fit" : "Post a fit"}</h2>
               <button onClick={() => { setShowModal(false); resetForm(); }} style={{ background: "none", border: "none", color: t.textMuted, cursor: "pointer" }}>
                 <X size={22} />
               </button>
             </div>
 
-            <div className="field-label">Photo</div>
-            <label htmlFor={fileInputId.current} className="drop-label">
-              {imgPreview ? <img src={imgPreview} alt="preview" /> : (
-                <><Plus size={26} color={t.textFaint} /><span style={{ fontSize: 13 }}>Tap to add a photo</span></>
+            <div className="field-label"><Images size={13} /> Photos ({existingImages.length + imgFiles.length}/{MAX_PHOTOS})</div>
+            <div className="photo-strip">
+              {existingImages.map((src, i) => (
+                <div className="photo-thumb" key={`ex-${i}`}>
+                  <img src={src} alt="" />
+                  <button className="photo-thumb-remove" onClick={() => removeExistingPhoto(i)}><X size={11} /></button>
+                </div>
+              ))}
+              {imgFiles.map((f, i) => (
+                <div className="photo-thumb" key={`new-${i}`}>
+                  <img src={f.preview} alt="" />
+                  <button className="photo-thumb-remove" onClick={() => removeNewPhoto(i)}><X size={11} /></button>
+                </div>
+              ))}
+              {existingImages.length + imgFiles.length < MAX_PHOTOS && (
+                <label htmlFor={photoInputId.current} className="drop-label" style={{ width: 76, height: 76 }}>
+                  <Plus size={20} color={t.textFaint} />
+                </label>
               )}
-            </label>
-            <input id={fileInputId.current} type="file" accept="image/*" onChange={handleFile} className="hidden-file-input" />
+            </div>
+            <input id={photoInputId.current} type="file" accept="image/*" multiple onChange={handlePhotoFiles} className="hidden-file-input" />
 
             <div className="field-label">Title</div>
             <input className="field-input" type="text" placeholder="e.g. Y2K black and white" value={title} onChange={(e) => setTitle(e.target.value)} />
@@ -1724,8 +2009,8 @@ export default function App() {
 
             {error && <div style={{ color: "#ff6b5e", fontSize: 13, marginTop: 12 }}>{error}</div>}
 
-            <button className="upload-cta" onClick={handleUpload} disabled={saving}>
-              {saving ? "Uploading…" : "Upload"}
+            <button className="upload-cta" onClick={handleSubmitOutfit} disabled={saving}>
+              {saving ? "Saving…" : editingOutfit ? "Save changes" : "Upload"}
             </button>
           </div>
         </div>
