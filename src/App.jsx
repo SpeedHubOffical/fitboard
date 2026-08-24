@@ -71,6 +71,9 @@ const STYLE_OPTIONS = [
 ];
 const PAGE_SIZE = 12;
 const MAX_PHOTOS = 5;
+const DONATION_URL = "https://paypal.me/fitsboard"; // swap for your real Buy Me a Coffee / Ko-fi / PayPal.me link
+const DONATION_INTERVAL_MS = 6 * 60 * 1000; // how often the support prompt can reappear
+const DONATION_SNOOZE_KEY = "fitboard-donation-snoozed-until";
 
 const THEMES = {
   dark: {
@@ -152,6 +155,7 @@ export default function App() {
   const [notifications, setNotifications] = useState([]);
   const [showNotifications, setShowNotifications] = useState(false);
   const [legalPage, setLegalPage] = useState(null);
+  const [showDonation, setShowDonation] = useState(false);
 
   const [showFilters, setShowFilters] = useState(false);
   const [minPrice, setMinPrice] = useState("");
@@ -515,7 +519,7 @@ export default function App() {
 
     const { error: writeError } = alreadyLiked
       ? await supabase.from("likes").delete().eq("outfit_id", item.id)
-      : await supabase.from("likes").insert({ outfit_id: item.id });
+      : await supabase.from("likes").insert({ outfit_id: item.id, user_id: session.user.id });
 
     if (writeError) {
       setLiked(liked);
@@ -531,7 +535,7 @@ export default function App() {
     setSaved(next);
     const { error: writeError } = alreadySaved
       ? await supabase.from("saves").delete().eq("outfit_id", id)
-      : await supabase.from("saves").insert({ outfit_id: id });
+      : await supabase.from("saves").insert({ outfit_id: id, user_id: session.user.id });
     if (writeError) setSaved(saved);
     else if (tab === "saved") loadSavedItems();
   }
@@ -680,6 +684,26 @@ export default function App() {
   async function deleteComment(commentId, outfitId) {
     await supabase.from("comments").delete().eq("id", commentId);
     loadComments(outfitId);
+  }
+
+  useEffect(() => {
+    if (!session) return;
+    const timer = setInterval(() => {
+      try {
+        const snoozedUntil = Number(localStorage.getItem(DONATION_SNOOZE_KEY) || 0);
+        if (Date.now() > snoozedUntil && !showModal && !showDetail) setShowDonation(true);
+      } catch {
+        setShowDonation(true);
+      }
+    }, DONATION_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, [session, showModal, showDetail]);
+
+  function dismissDonation(snoozeHours) {
+    setShowDonation(false);
+    try {
+      localStorage.setItem(DONATION_SNOOZE_KEY, String(Date.now() + snoozeHours * 60 * 60 * 1000));
+    } catch {}
   }
 
   function currentProfile() {
@@ -1354,20 +1378,36 @@ export default function App() {
         }
         * { transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease; }
         @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
-        @keyframes slideUp { from { transform: translateY(24px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
-        @keyframes popIn { from { transform: scale(0.9); opacity: 0; } to { transform: scale(1); opacity: 1; } }
-        @keyframes heartPop { 0% { transform: scale(1); } 40% { transform: scale(1.35); } 100% { transform: scale(1); } }
-        .card { animation: popIn 0.25s ease both; }
-        .modal-backdrop, .detail-backdrop { animation: fadeIn 0.2s ease both; }
-        .modal-sheet { animation: slideUp 0.28s cubic-bezier(0.22, 1, 0.36, 1) both; }
-        .detail-card { animation: popIn 0.25s cubic-bezier(0.22, 1, 0.36, 1) both; }
-        .card, .fab, .icon-btn, .nav-btn, .action-btn, .style-chip, .filter-btn, .ob-style-chip, .ob-gender-btn {
-          transition: transform 0.15s ease, background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+        @keyframes slideUp { from { transform: translateY(28px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+        @keyframes popIn { from { transform: scale(0.92) translateY(8px); opacity: 0; } to { transform: scale(1) translateY(0); opacity: 1; } }
+        @keyframes heartPop { 0% { transform: scale(1); } 35% { transform: scale(1.4); } 60% { transform: scale(0.95); } 100% { transform: scale(1); } }
+        @keyframes shimmer { 0% { background-position: -300px 0; } 100% { background-position: 300px 0; } }
+        .card {
+          animation: popIn 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
+          animation-delay: calc(var(--card-i, 0) * 35ms);
         }
-        .fab { transition: transform 0.15s cubic-bezier(0.34, 1.56, 0.64, 1); }
-        .heart-pop { animation: heartPop 0.35s ease; }
-        .nav-btn { transition: color 0.2s ease, transform 0.15s ease; }
-        .nav-btn:active { transform: scale(0.92); }
+        .skeleton-card {
+          break-inside: avoid; margin-bottom: 10px; border-radius: 16px; height: 220px;
+          background: linear-gradient(90deg, ${t.cardAlt} 25%, ${t.card} 37%, ${t.cardAlt} 63%);
+          background-size: 400px 100%; animation: shimmer 1.4s ease infinite;
+        }
+        .modal-backdrop, .detail-backdrop {
+          position: fixed; inset: 0; background: rgba(0,0,0,0.55); backdrop-filter: blur(2px);
+          display: flex; align-items: flex-end; z-index: 40; animation: fadeIn 0.22s ease both;
+        }
+        .detail-backdrop { align-items: center; justify-content: center; padding: 16px; }
+        .modal-sheet { animation: slideUp 0.32s cubic-bezier(0.16, 1, 0.3, 1) both; }
+        .detail-card { animation: popIn 0.3s cubic-bezier(0.16, 1, 0.3, 1) both; }
+        .card, .fab, .icon-btn, .nav-btn, .action-btn, .style-chip, .filter-btn, .ob-style-chip, .ob-gender-btn, .settings-row, .buy-link-btn {
+          transition: transform 0.16s cubic-bezier(0.34, 1.56, 0.64, 1), background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+        }
+        .card:active, .action-btn:active, .style-chip:active, .buy-link-btn:active, .settings-row:active { transform: scale(0.96); }
+        .fab { transition: transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.2s ease; }
+        .fab:active { transform: scale(0.86) rotate(-6deg); }
+        .heart-pop { animation: heartPop 0.45s cubic-bezier(0.34, 1.56, 0.64, 1); }
+        .nav-btn { transition: color 0.2s ease, transform 0.15s cubic-bezier(0.34, 1.56, 0.64, 1); }
+        .nav-btn:active { transform: scale(0.9); }
+        .icon-btn:active { transform: scale(0.9); }
       `}</style>
 
       {tab === "profile" ? (
@@ -1497,7 +1537,11 @@ export default function App() {
           )}
 
           {loading ? (
-            <div style={{ ...styles.empty, animation: "fadeIn 0.4s ease" }}>Loading looks…</div>
+            <div className="masonry">
+              {Array.from({ length: 8 }).map((_, i) => (
+                <div className="skeleton-card" key={i} style={{ height: 180 + (i % 3) * 60 }} />
+              ))}
+            </div>
           ) : loadError ? (
             <div style={styles.empty}>{loadError}</div>
           ) : sortedFiltered.length === 0 ? (
@@ -1509,8 +1553,8 @@ export default function App() {
           ) : (
             <>
               <div className="masonry">
-                {sortedFiltered.map((item) => (
-                  <div className="card" key={item.id} onClick={() => setShowDetail(item)}>
+                {sortedFiltered.map((item, i) => (
+                  <div className="card" key={item.id} style={{ "--card-i": i % 10 }} onClick={() => setShowDetail(item)}>
                     <img src={coverImage(item)} alt={item.title || "Outfit"} loading="lazy" />
                     <div className="price-tag">€{item.price}</div>
                     <div className="like-badge"><Heart size={10} /> {item.like_count || 0}</div>
@@ -1899,6 +1943,34 @@ export default function App() {
         </div>
       )}
 
+      {showDonation && (
+        <div className="modal-backdrop" onClick={() => dismissDonation(2)}>
+          <div className="modal-sheet" onClick={(e) => e.stopPropagation()} style={{ textAlign: "center" }}>
+            <div style={{ fontSize: 34, marginBottom: 6 }}>💛</div>
+            <h2 style={{ margin: 0, fontSize: 18, fontWeight: 800 }}>Enjoying FitBoard?</h2>
+            <div style={{ fontSize: 13.5, color: t.textMuted, marginTop: 8, lineHeight: 1.6 }}>
+              FitBoard is built and run independently. If you're finding it useful, a small donation helps keep it online and growing.
+            </div>
+            <a
+              href={DONATION_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="upload-cta"
+              style={{ display: "block", textDecoration: "none", textAlign: "center" }}
+              onClick={() => dismissDonation(24)}
+            >
+              Support FitBoard
+            </a>
+            <div
+              style={{ marginTop: 14, fontSize: 13, color: t.textFaint, cursor: "pointer" }}
+              onClick={() => dismissDonation(2)}
+            >
+              Maybe later
+            </div>
+          </div>
+        </div>
+      )}
+
       {showReportModal && (
         <div className="modal-backdrop" onClick={() => setShowReportModal(false)}>
           <div className="modal-sheet" onClick={(e) => e.stopPropagation()}>
@@ -2111,71 +2183,4 @@ export default function App() {
               </div>
             )}
 
-            <div className="settings-row" onClick={() => { setShowSettings(false); setLegalPage("about"); }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <Info size={17} />
-                <div style={{ fontWeight: 700, fontSize: 14 }}>About & Contact</div>
-              </div>
-              <span style={{ color: t.textFaint }}>›</span>
-            </div>
-
-            <div className="settings-row" onClick={() => { setShowSettings(false); setLegalPage("terms"); }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <FileText size={17} />
-                <div style={{ fontWeight: 700, fontSize: 14 }}>Terms of Service</div>
-              </div>
-              <span style={{ color: t.textFaint }}>›</span>
-            </div>
-
-            <div className="settings-row" onClick={() => { setShowSettings(false); setLegalPage("privacy"); }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <Shield size={17} />
-                <div style={{ fontWeight: 700, fontSize: 14 }}>Privacy Policy</div>
-              </div>
-              <span style={{ color: t.textFaint }}>›</span>
-            </div>
-
-            <div className="settings-row" onClick={handleSignOut}>
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <LogOut size={17} color="#ff6b5e" />
-                <div style={{ fontWeight: 700, fontSize: 14, color: "#ff6b5e" }}>Sign out</div>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {showEditProfile && (
-        <div className="modal-backdrop" onClick={() => setShowEditProfile(false)}>
-          <div className="modal-sheet" onClick={(e) => e.stopPropagation()}>
-            <div className="sheet-header">
-              <button className="back-btn" onClick={() => setShowEditProfile(false)}><ChevronLeft size={18} /> Back</button>
-              <h2 style={{ margin: 0, fontSize: 16, fontWeight: 800 }}>Edit profile</h2>
-              <div style={{ width: 40 }} />
-            </div>
-
-            <label htmlFor={avatarInputId.current} className="avatar-picker" style={{ marginTop: 14 }}>
-              {editAvatar ? <img src={editAvatar} alt="avatar preview" /> : <Camera size={22} color={t.textFaint} />}
-            </label>
-            <input id={avatarInputId.current} type="file" accept="image/*" onChange={handleAvatarFile} className="hidden-file-input" />
-
-            <div className="field-label">Username</div>
-            <input className="field-input" type="text" placeholder="e.g. jaxfits" value={editUsername} onChange={(e) => setEditUsername(e.target.value)} />
-
-            <div className="field-label">Bio</div>
-            <input className="field-input" type="text" placeholder="A line about your style" value={editBio} onChange={(e) => setEditBio(e.target.value)} />
-
-            {error && <div style={{ color: "#ff6b5e", fontSize: 13, marginTop: 12 }}>{error}</div>}
-
-            <button className="upload-cta" onClick={saveProfile}>Save profile</button>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-const styles = {
-  page: { minHeight: "100vh", fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif", paddingBottom: 80 },
-  empty: { textAlign: "center", color: "#888", padding: "60px 20px", fontSize: 14, lineHeight: 1.6 },
-};
+            <div className="settings-row" onClick={
