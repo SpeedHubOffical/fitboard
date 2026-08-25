@@ -71,7 +71,7 @@ const STYLE_OPTIONS = [
 ];
 const PAGE_SIZE = 12;
 const MAX_PHOTOS = 5;
-const DONATION_URL = "https://paypal.me/fitsboard"; // swap for your real Buy Me a Coffee / Ko-fi / PayPal.me link
+const DONATION_URL = "https://buymeacoffee.com/fitboard"; // swap for your real Buy Me a Coffee / Ko-fi / PayPal.me link
 const DONATION_INTERVAL_MS = 6 * 60 * 1000; // how often the support prompt can reappear
 const DONATION_SNOOZE_KEY = "fitboard-donation-snoozed-until";
 
@@ -151,6 +151,9 @@ export default function App() {
   const [showReportsPanel, setShowReportsPanel] = useState(false);
   const [reports, setReports] = useState([]);
   const [reportsLoading, setReportsLoading] = useState(false);
+  const [showBannedPanel, setShowBannedPanel] = useState(false);
+  const [bannedUsers, setBannedUsers] = useState([]);
+  const [bannedLoading, setBannedLoading] = useState(false);
 
   const [notifications, setNotifications] = useState([]);
   const [showNotifications, setShowNotifications] = useState(false);
@@ -903,6 +906,18 @@ export default function App() {
     } else {
       alert("User banned.");
     }
+  }
+
+  async function loadBannedUsers() {
+    setBannedLoading(true);
+    const { data } = await supabase.from("banned_users").select("*").order("banned_at", { ascending: false });
+    setBannedUsers(data || []);
+    setBannedLoading(false);
+  }
+
+  async function unbanUser(userId) {
+    setBannedUsers((prev) => prev.filter((b) => b.user_id !== userId));
+    await supabase.from("banned_users").delete().eq("user_id", userId);
   }
 
   function openEditProfile() {
@@ -1943,6 +1958,42 @@ export default function App() {
         </div>
       )}
 
+      {showBannedPanel && isAdmin && (
+        <div className="modal-backdrop" onClick={() => setShowBannedPanel(false)}>
+          <div className="modal-sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="sheet-header">
+              <h2 style={{ margin: 0, fontSize: 18, fontWeight: 800 }}>Banned users</h2>
+              <button onClick={() => setShowBannedPanel(false)} style={{ background: "none", border: "none", color: t.textMuted, cursor: "pointer" }}>
+                <X size={22} />
+              </button>
+            </div>
+            {bannedLoading ? (
+              <div style={{ ...styles.empty, padding: "40px 0" }}>Loading…</div>
+            ) : bannedUsers.length === 0 ? (
+              <div style={{ ...styles.empty, padding: "40px 0" }}>Nobody's banned right now.</div>
+            ) : (
+              bannedUsers.map((b) => {
+                const p = profiles[b.user_id];
+                return (
+                  <div key={b.user_id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 4px", borderBottom: `1px solid ${t.border}` }}>
+                    <div style={{ width: 34, height: 34, borderRadius: "50%", background: t.cardAlt, border: `1px solid ${t.border}`, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
+                      {p && p.avatar_url ? <img src={p.avatar_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <User size={15} color={t.textFaint} />}
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontWeight: 700, fontSize: 13.5 }}>{(p && p.username) || "Unknown user"}</div>
+                      <div style={{ fontSize: 11, color: t.textFaint }}>Banned {new Date(b.banned_at).toLocaleDateString()}</div>
+                    </div>
+                    <button className="action-btn" style={{ flex: "0 0 auto", fontSize: 12, padding: "8px 14px" }} onClick={() => unbanUser(b.user_id)}>
+                      Unban
+                    </button>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </div>
+      )}
+
       {showDonation && (
         <div className="modal-backdrop" onClick={() => dismissDonation(2)}>
           <div className="modal-sheet" onClick={(e) => e.stopPropagation()} style={{ textAlign: "center" }}>
@@ -2127,60 +2178,4 @@ export default function App() {
 
             {error && <div style={{ color: "#ff6b5e", fontSize: 13, marginTop: 12 }}>{error}</div>}
 
-            <button className="upload-cta" onClick={handleSubmitOutfit} disabled={saving}>
-              {saving ? "Saving…" : editingOutfit ? "Save changes" : "Upload"}
-            </button>
-          </div>
-        </div>
-      )}
-
-      {showSettings && (
-        <div className="modal-backdrop" onClick={() => setShowSettings(false)}>
-          <div className="modal-sheet" onClick={(e) => e.stopPropagation()}>
-            <div className="sheet-header">
-              <h2 style={{ margin: 0, fontSize: 18, fontWeight: 800 }}>Settings</h2>
-              <button onClick={() => setShowSettings(false)} style={{ background: "none", border: "none", color: t.textMuted, cursor: "pointer" }}>
-                <X size={22} />
-              </button>
-            </div>
-
-            <div style={{ fontSize: 12, color: t.textFaint, marginTop: 10 }}>
-              Signed in as {session.user.email}{isAdmin ? " · Admin" : ""}
-            </div>
-
-            <div className="settings-row" style={{ cursor: "default" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                {themeName === "dark" ? <Moon size={17} /> : <Sun size={17} />}
-                <div>
-                  <div style={{ fontWeight: 700, fontSize: 14 }}>Dark mode</div>
-                  <div style={{ fontSize: 12, color: t.textMuted }}>{themeName === "dark" ? "On" : "Off"}</div>
-                </div>
-              </div>
-              <div className="toggle-track" onClick={toggleTheme}><div className="toggle-thumb" /></div>
-            </div>
-
-            <div className="settings-row" onClick={() => { setShowSettings(false); openEditProfile(); }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <User size={17} />
-                <div>
-                  <div style={{ fontWeight: 700, fontSize: 14 }}>Edit profile</div>
-                  <div style={{ fontSize: 12, color: t.textMuted }}>Username, bio, photo</div>
-                </div>
-              </div>
-              <span style={{ color: t.textFaint }}>›</span>
-            </div>
-
-            {isAdmin && (
-              <div className="settings-row" onClick={() => { setShowSettings(false); setShowReportsPanel(true); loadReports(); }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                  <Flag size={17} color={t.accent} />
-                  <div>
-                    <div style={{ fontWeight: 700, fontSize: 14 }}>Reports</div>
-                    <div style={{ fontSize: 12, color: t.textMuted }}>Review flagged outfits and users</div>
-                  </div>
-                </div>
-                <span style={{ color: t.textFaint }}>›</span>
-              </div>
-            )}
-
-            <div className="settings-row" onClick={
+     
